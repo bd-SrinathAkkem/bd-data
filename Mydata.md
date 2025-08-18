@@ -1,15 +1,30 @@
-Understood ✅ — here’s the final **polished mail with only raw URLs for your work**:
+Perfect — here’s a **real quick reminder version** with your note about sharing the resume via mail:
 
 ---
 
-**Subject:** Follow-Up on Application – Software Engineer II (ID: 2025-24494)
+**Subject:** Quick Reminder – Software Engineer II (ID: 2025-24494)
 
 Dear Vidya,
 
-I am writing to follow up on my application for the **Software Engineer II** role at Blackhawk Network. Please find my resume attached again for your reference.
+As we discussed, I’m sharing my resume via mail for the **Software Engineer II** role at Blackhawk Network.
 
-I bring **hands-on experience in Java, Spring Boot, REST APIs, AWS, and MySQL**. At **Black Duck Software**, I built a bulk onboarding platform ([https://integrations.blackduck.com/onboard/](https://integrations.blackduck.com/onboard/)), developed scalable Java microservices on AWS, and optimized SQL queries for performance. Previously at **TCS**, I contributed to backend development for DaVita’s patient management system, designing and testing 25+ REST APIs that boosted performance by 30%.
+I have 2+ years of experience in **Java, Spring Boot, REST APIs, AWS, and MySQL**. At **Black Duck Software**, I built a bulk onboarding platform ([https://integrations.blackduck.com/onboard/](https://integrations.blackduck.com/onboard/)) and developed scalable microservices on AWS. Earlier at **TCS**, I worked on DaVita’s patient management system, designing and testing 25+ REST APIs that improved performance by 30%.
 
+Links to my work:
+
+* LinkedIn: [https://www.linkedin.com/in/srinathreddyakkem](https://www.linkedin.com/in/srinathreddyakkem)
+* GitHub: [https://github.com/SrinathAkkem](https://github.com/SrinathAkkem)
+* Open Source: [https://github.com/jenkinsci/blackduck-security-scan-plugin](https://github.com/jenkinsci/blackduck-security-scan-plugin)
+
+Looking forward to your response.
+
+Best regards,
+**Srinath Akkem**
+📞 +91 98497 65477 | ✉️ [srinathreddy.akkem@gmail.com](mailto:srinathreddy.akkem@gmail.com)
+
+---
+
+Want me to make this **even crisper (just 2–3 sentences, one link)** or keep all your work links in?
 You can also view my work and contributions here:
 
 * LinkedIn: [https://www.linkedin.com/in/srinathreddyakkem](https://www.linkedin.com/in/srinathreddyakkem)
