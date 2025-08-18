@@ -1,45 +1,77 @@
-Perfect — here’s a **real quick reminder version** with your note about sharing the resume via mail:
+Content A:
 
----
+**1. Create Tag**
+- Triggered if `$BD_VERSION` or `$CI_COMMIT_TAG` is set.
+- Validates the version format and extracts components.
+- Checks if the tag already exists:
+  - If it exists, skips creation.
+  - If not, creates an annotated tag and pushes it to the remote.
 
-**Subject:** Quick Reminder – Software Engineer II (ID: 2025-24494)
+**2. Create Release**
+- Triggered if `$BD_CREATE_RELEASE == "true"` and a valid version/tag is set.
+- Ensures the tag exists.
+- Checks if a release already exists for the tag:
+  - If it exists, skips creation.
+  - If not, creates a new release using the GitLab API.
+- Handles prerelease and published release types.
 
-Dear Vidya,
+**3. Sync Tags (latest, major)**
+- Triggered if `$BD_SYNC_TAGS == "true"` and a valid version/tag is set.
+- Skips if the tag is a prerelease or not in `vX.Y.Z` format.
+- Fetches all tags and ensures the main tag exists.
+- For each of `v$BD_MAJOR` and `latest`:
+  - Deletes the tag locally and remotely if it exists.
+  - Recreates the tag pointing to the current release commit.
+  - Pushes the tag to the remote.
 
-As we discussed, I’m sharing my resume via mail for the **Software Engineer II** role at Blackhawk Network.
+**General Flow**
+- Each stage depends on the previous one via `needs` and artifact passing.
+- Variables are exported and reused between jobs using dotenv artifacts.
 
-I have 2+ years of experience in **Java, Spring Boot, REST APIs, AWS, and MySQL**. At **Black Duck Software**, I built a bulk onboarding platform ([https://integrations.blackduck.com/onboard/](https://integrations.blackduck.com/onboard/)) and developed scalable microservices on AWS. Earlier at **TCS**, I worked on DaVita’s patient management system, designing and testing 25+ REST APIs that improved performance by 30%.
+**Pipeline Stages (in order):**
+1. `bd_validate_version`
+2. `bd_create_tag`
+3. `bd_create_release`
+4. `bd_sync_tags`
 
-Links to my work:
+**How to trigger:**
+- Set the appropriate variables (`BD_VERSION`, `BD_CREATE_RELEASE`, `BD_SYNC_TAGS`) in the pipeline or CI/CD variables.
+- Push a commit or tag, or run the pipeline manually with the desired variables.
 
-* LinkedIn: [https://www.linkedin.com/in/srinathreddyakkem](https://www.linkedin.com/in/srinathreddyakkem)
-* GitHub: [https://github.com/SrinathAkkem](https://github.com/SrinathAkkem)
-* Open Source: [https://github.com/jenkinsci/blackduck-security-scan-plugin](https://github.com/jenkinsci/blackduck-security-scan-plugin)
+**Note:**  
+All jobs use a retry mechanism and require a valid `CI_JOB_TOKEN` for Git and API operations.
 
-Looking forward to your response.
 
-Best regards,
-**Srinath Akkem**
-📞 +91 98497 65477 | ✉️ [srinathreddy.akkem@gmail.com](mailto:srinathreddy.akkem@gmail.com)
+Content B:
 
----
+Code Freeze and Release
 
-Want me to make this **even crisper (just 2–3 sentences, one link)** or keep all your work links in?
-You can also view my work and contributions here:
+Create Tag
 
-* LinkedIn: [https://www.linkedin.com/in/srinathreddyakkem](https://www.linkedin.com/in/srinathreddyakkem)
-* GitHub: [https://github.com/SrinathAkkem](https://github.com/SrinathAkkem)
-* Open Source Plugin Contribution: [https://github.com/jenkinsci/blackduck-security-scan-plugin](https://github.com/jenkinsci/blackduck-security-scan-plugin)
-* Research Paper: [https://ieeexplore.ieee.org/document/10060879](https://ieeexplore.ieee.org/document/10060879)
+Using the semver_upgrade.yml Workflow:
 
-I am excited about the opportunity to contribute my backend engineering expertise to Blackhawk Network’s innovative payment systems.
+Navigate to the CI/CD > Pipelines tab within your GitLab project.
+Click on Run Pipeline.
+Enter the following input:
+VERSION=Enter the new version number (e.g., vX.Y.Z).
+Click Run Pipeline.
+This workflow will create a new tag and push it to the remote repository.
+QA Approval
 
-Looking forward to your response.
+Submit the tagged release for QA approval via the SIGINT ticket.
+Create a SIGINT Jira ticket assigned to the Security Champion (@Suhas LR).
+Include links to scan results and SBOM from pipelines.
+Publish to Marketplace
 
-Best regards,
-**Srinath Akkem**
-📞 +91 98497 65477 | ✉️ [srinathreddy.akkem@gmail.com](mailto:srinathreddy.akkem@gmail.com)
+GitLab CI/CD Publishing
 
----
+Begin by manually drafting a release for the marketplace and marking it as the latest version.
+The sync-tags action workflow should automatically trigger.
+If the workflow does not trigger, you can manually initiate it by following these steps:
+Navigate to the CI/CD > Pipelines tab within your GitLab project.
+Click on Run Pipeline.
+Complete the following inputs:
+SYNC_TAGS=true
+Finally, click Run Pipeline.
+This workflow will ensure that all tags are synchronized with the remote repository.
 
-Do you also want me to **add your "Star of the Month / Top Performer" achievements** in a short line, or keep this focused on work + links?
