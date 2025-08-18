@@ -1,27 +1,27 @@
 variables:
-  GIT_STRATEGY: clone
-  GIT_DEPTH: 50
-  RETRY_COUNT: "2"
-  VERSION:
-    value: v0.0.0
-    description: "Template Version"
-  CREATE_RELEASE:
+  BD_RETRY_COUNT: "2"
+  BD_VERSION:
+    value: "v1.0.0"
+    description: "Black Duck Template Version"
+  BD_CREATE_RELEASE:
     value: "false"
     description: "Create a release for the version"
-  SYNC_TAGS:
+  BD_SYNC_TAGS:
     value: "false"
     description: "Sync tags to latest commit"
 
-.semver_base:
+# Base configuration for all Black Duck jobs
+.bd_semver_base:
   retry:
     max: 2
     when:
       - runner_system_failure
       - stuck_or_timeout_failure
+      - api_failure
   before_script:
-    - apt-get update && apt-get install -y git curl jq bash retry
-    - git config --global user.name "GitLab CI"
-    - git config --global user.email "gitlab-ci@${CI_SERVER_HOST}"
+    - apt-get update -qq && apt-get install -y -qq git curl jq bash
+    - git config --global user.name "Black Duck CI"
+    - git config --global user.email "blackduck-ci@${CI_SERVER_HOST}"
     - git config --global --add safe.directory "$CI_PROJECT_DIR"
     - git remote set-url origin "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
     - |
@@ -30,252 +30,217 @@ variables:
         exit 1
       fi
     - |
-      retry_cmd() {
-        local n=0
-        until "$@"; do
-          n=$((n+1))
-          if [ $n -ge ${RETRY_COUNT:-2} ]; then
-            echo "ERROR: Command failed after $n attempts"
+      bd_retry_cmd() {
+        local cmd="$*"
+        local attempt=0
+        local max_attempts=${BD_RETRY_COUNT:-2}
+      
+        until eval "$cmd"; do
+          attempt=$((attempt + 1))
+          if [ $attempt -ge $max_attempts ]; then
+            echo "ERROR: Command failed after $attempt attempts"
             return 1
           fi
-          echo "Retrying ($n/${RETRY_COUNT}): $*"
+          echo "Retrying ($attempt/$max_attempts)..."
           sleep 2
         done
       }
 
-
-validate_version:
-  extends: .semver_base
-  stage: validate
+# Stage 1: Validate version format and extract components
+bd_validate_version:
+  extends: .bd_semver_base
+  stage: bd_validate_version
   script:
     - |
       set -e
       
       # Determine version source
-      if [ -n "${VERSION:-}" ]; then
-        TAG_NAME="$VERSION"
+      if [ -n "${BD_VERSION:-}" ] && [ "${BD_VERSION}" != "" ]; then
+        BD_TAG_NAME="$BD_VERSION"
+        echo "Using BD_VERSION: $BD_TAG_NAME"
       elif [ -n "${CI_COMMIT_TAG:-}" ]; then
-        TAG_NAME="$CI_COMMIT_TAG"
+        BD_TAG_NAME="$CI_COMMIT_TAG"
+        echo "Using Git tag: $BD_TAG_NAME"
       else
-        echo "ERROR: No VERSION variable or tag provided"
+        echo "ERROR: No BD_VERSION or Git tag provided"
         exit 1
       fi
       
-      echo "Validating version: $TAG_NAME"
+      echo "Validating version: $BD_TAG_NAME"
       
-      # Validate semver format
-      if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
+      # Validate semantic version format
+      if [[ ! "$BD_TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?(\+[a-zA-Z0-9.-]+)?$ ]]; then
         echo "ERROR: Invalid format. Expected: vX.Y.Z or vX.Y.Z-prerelease"
+        echo "Received: $BD_TAG_NAME"
         exit 1
       fi
       
       # Parse version components
-      VERSION_NO_V="${TAG_NAME#v}"
-      BASE_VERSION=$(echo "$VERSION_NO_V" | sed 's/-.*//')
-      IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
+      BD_VERSION_NO_V="${BD_TAG_NAME#v}"
+      BD_BASE_VERSION=$(echo "$BD_VERSION_NO_V" | sed -E 's/[-+].*//')
+      IFS='.' read -r BD_MAJOR BD_MINOR BD_PATCH <<< "$BD_BASE_VERSION"
       
       # Determine release type
-      if [[ "$TAG_NAME" =~ - ]]; then
-        IS_PRERELEASE="true"
+      if [[ "$BD_TAG_NAME" =~ - ]]; then
+        BD_IS_PRERELEASE="true"
       else
-        IS_PRERELEASE="false"
+        BD_IS_PRERELEASE="false"
       fi
       
-      echo "Version validated: $TAG_NAME (Major: $MAJOR, Minor: $MINOR, Patch: $PATCH, Prerelease: $IS_PRERELEASE)"
-      
-      
-      echo "TAG_NAME=$TAG_NAME" > version.env
-      echo "MAJOR=$MAJOR" >> version.env
-      echo "MINOR=$MINOR" >> version.env
-      echo "PATCH=$PATCH" >> version.env
-      echo "IS_PRERELEASE=$IS_PRERELEASE" >> version.env
-  artifacts:
-    reports:
-      dotenv: version.env
-    expire_in: 1 hour
-  rules:
-    - if: '$VERSION'
-    - if: '$CI_COMMIT_TAG'
-
-create_tag:
-  extends: .semver_base
-  stage: tag
-  needs: [validate_version]
-  script:
-    - |
-      set -e
-      echo "Creating tag: $TAG_NAME"
-      
-      retry_cmd git fetch --all --tags
-      
-      # Check existing tag
-      if git tag -l | grep -q "^$TAG_NAME$"; then
-        if [ "${FORCE_RECREATE:-false}" != "true" ]; then
-          echo "ERROR: Tag exists. Set FORCE_RECREATE=true to overwrite"
-          exit 1
-        fi
-        echo "Recreating existing tag"
-        git tag -d "$TAG_NAME"
-        retry_cmd git push origin ":refs/tags/$TAG_NAME"
-      fi
-      
-      # Create and push tag
-      git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
-      retry_cmd git push origin "$TAG_NAME"
-      
-      echo "Tag created successfully: $TAG_NAME"
-  rules:
-    - if: '$VERSION'
-
-create_release:
-  extends: .semver_base
-  stage: release
-  needs: [validate_version]
-  script:
-    - |
-      set -e
-      echo "Creating release: $TAG_NAME"
-      
-      # Verify tag exists
-      retry_cmd git fetch --all --tags
-      if ! git tag -l | grep -q "^$TAG_NAME$"; then
-        echo "ERROR: Tag $TAG_NAME not found"
+      # Validate numeric components
+      if ! [[ "$BD_MAJOR" =~ ^[0-9]+$ ]] || ! [[ "$BD_MINOR" =~ ^[0-9]+$ ]] || ! [[ "$BD_PATCH" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Version components must be numeric"
         exit 1
       fi
       
-      # Build release description
-      DESCRIPTION="Black Duck Security Scan $TAG_NAME"
+      echo "Version validated: $BD_TAG_NAME (Major: $BD_MAJOR, Minor: $BD_MINOR, Patch: $BD_PATCH, Prerelease: $BD_IS_PRERELEASE)"
       
-      # Check existing release
-      EXISTING=$(curl -s --header "PRIVATE-TOKEN: $CI_JOB_TOKEN" \
-        "https://${CI_SERVER_HOST}/api/v4/projects/$CI_PROJECT_ID/releases/$TAG_NAME" 2>/dev/null || echo "null")
+      # Export variables for subsequent jobs
+      {
+        echo "BD_TAG_NAME=$BD_TAG_NAME"
+        echo "BD_MAJOR=$BD_MAJOR"
+        echo "BD_MINOR=$BD_MINOR"
+        echo "BD_PATCH=$BD_PATCH"
+        echo "BD_IS_PRERELEASE=$BD_IS_PRERELEASE"
+      } > bd_version.env
+  artifacts:
+    reports:
+      dotenv: bd_version.env
+    expire_in: 1 hour
+  rules:
+    - if: '$BD_VERSION != null && $BD_VERSION != ""'
+      when: always
+    - if: '$CI_COMMIT_TAG'
+      when: always
+
+# Stage 2: Create Git tag
+bd_create_tag:
+  extends: .bd_semver_base
+  stage: bd_create_tag
+  needs:
+    - job: bd_validate_version
+      artifacts: true
+  script:
+    - |
+      set -e
       
-        if [ "$EXISTING" != "null" ] && [ "$EXISTING" != "" ]; then
-        if [ "${FORCE_RECREATE:-false}" != "true" ]; then
-        echo "Release already exists, skipping"
-        exit 0
-        fi
-        echo "Updating existing release"
-        fi
+      [ -z "${BD_TAG_NAME:-}" ] && { echo "ERROR: BD_TAG_NAME not available"; exit 1; }
       
-        # Set release status
-        if [ "$IS_PRERELEASE" = "true" ]; then
-        RELEASED_AT="null"
-        echo "Creating draft release (prerelease)"
-        else
-        RELEASED_AT="\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\""
-        echo "Creating published release"
-        fi
+      bd_retry_cmd "git fetch --all --tags --prune"
       
-        # Create release
-        PAYLOAD=$(jq -nc \
-        --arg name "Release $TAG_NAME" \
-        --arg tag "$TAG_NAME" \
-        --arg desc "$DESCRIPTION" \
+      git tag -l | grep -q "^${BD_TAG_NAME}$" && { echo "Tag $BD_TAG_NAME already exists, skipping"; exit 0; }
+      
+      git tag -a "$BD_TAG_NAME" -m "Release $BD_TAG_NAME"
+      bd_retry_cmd "git push origin $BD_TAG_NAME"
+      
+      echo "Tag created: $BD_TAG_NAME"
+  rules:
+    - if: '$BD_VERSION != null && $BD_VERSION != ""'
+      when: on_success
+    - if: '$CI_COMMIT_TAG'
+      when: on_success
+
+# Stage 3: Create GitLab release
+bd_create_release:
+  extends: .bd_semver_base
+  stage: bd_create_release
+  needs:
+    - job: bd_validate_version
+      artifacts: true
+    - job: bd_create_tag
+      optional: true
+  script:
+    - |
+      set -e
+      
+      [ -z "${BD_TAG_NAME:-}" ] && { echo "ERROR: BD_TAG_NAME not available from validation stage"; exit 1; }
+      
+      echo "Creating GitLab release: $BD_TAG_NAME"
+      
+      bd_retry_cmd "git fetch --all --tags --prune"
+      
+      git tag -l | grep -q "^${BD_TAG_NAME}$" || { echo "ERROR: Git tag $BD_TAG_NAME not found"; exit 1; }
+      
+      RELEASE_DESCRIPTION="BlackDuck Security Scan $BD_TAG_NAME"
+      
+      EXISTING_RELEASE_RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" \
+        --header "PRIVATE-TOKEN: $CI_JOB_TOKEN" \
+        "https://${CI_SERVER_HOST}/api/v4/projects/$CI_PROJECT_ID/releases/$BD_TAG_NAME" 2>/dev/null || echo "HTTPSTATUS:404")
+      
+      HTTP_STATUS=$(echo "$EXISTING_RELEASE_RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
+      
+      [ "$HTTP_STATUS" = "200" ] && { echo "Release already exists, skipping creation"; exit 0; }
+      
+      RELEASED_AT=$([ "$BD_IS_PRERELEASE" = "true" ] && echo "null" || echo "\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"")
+      echo $([ "$BD_IS_PRERELEASE" = "true" ] && echo "Creating draft prerelease" || echo "Creating published release")
+      
+      RELEASE_PAYLOAD=$(jq -nc \
+        --arg name "Release $BD_TAG_NAME" \
+        --arg tag "$BD_TAG_NAME" \
+        --arg desc "$RELEASE_DESCRIPTION" \
         --argjson released "$RELEASED_AT" \
         '{name: $name, tag_name: $tag, description: $desc, released_at: $released}')
       
-        retry_cmd curl -s --fail-with-body \
+      echo "Creating new release..."
+      RELEASE_RESPONSE=$(bd_retry_cmd "curl -s -w 'HTTPSTATUS:%{http_code}' \
         --request POST \
-      --header "PRIVATE-TOKEN: $CI_JOB_TOKEN" \
-      --header "Content-Type: application/json" \
-        --data "$PAYLOAD" \
-        "https://${CI_SERVER_HOST}/api/v4/projects/$CI_PROJECT_ID/releases" > "/dev/null"
+        --header 'PRIVATE-TOKEN: $CI_JOB_TOKEN' \
+        --header 'Content-Type: application/json' \
+        --data '$RELEASE_PAYLOAD' \
+        'https://${CI_SERVER_HOST}/api/v4/projects/$CI_PROJECT_ID/releases'")
       
-      echo "Release created: $CI_PROJECT_URL/-/releases/$TAG_NAME"
-      rules:
-        - if: '$CREATE_RELEASE == "true"'
+      RELEASE_HTTP_STATUS=$(echo "$RELEASE_RESPONSE" | grep -o "HTTPSTATUS:[0-9]*" | cut -d: -f2)
+      
+      [ "$RELEASE_HTTP_STATUS" = "200" ] || [ "$RELEASE_HTTP_STATUS" = "201" ] && \
+        echo "Release created successfully: $BD_TAG_NAME" || \
+        { echo "ERROR: Failed to create release (HTTP $RELEASE_HTTP_STATUS)"; exit 1; }
+  rules:
+    - if: '$BD_CREATE_RELEASE == "true" && $BD_VERSION != null && $BD_VERSION != ""'
+      when: on_success
+    - if: '$BD_CREATE_RELEASE == "true" && $CI_COMMIT_TAG'
+      when: on_success
 
-sync_tags:
-  extends: .semver_base
-  stage: sync
-  needs: [validate_version]
+# Stage 4: Sync version tags (latest, major)
+bd_sync_tags:
+  extends: .bd_semver_base
+  stage: bd_sync_tags
+  needs:
+    - job: bd_validate_version
+      artifacts: true
+    - job: bd_create_tag
+      optional: true
+    - job: bd_create_release
+      optional: true
   script:
     - |
       set -e
       
-      # Determine sync target
-      if [ -n "${VERSION:-}" ]; then
-        SYNC_TAG="$VERSION"
-      else
-        echo "Finding latest published release"
-        SYNC_TAG=$(curl -s --header "PRIVATE-TOKEN: $CI_JOB_TOKEN" \
-          "https://${CI_SERVER_HOST}/api/v4/projects/$CI_PROJECT_ID/releases" | \
-          jq -r 'map(select(.released_at != null)) | sort_by(.released_at) | reverse | .[0].tag_name // empty')
+      [ -z "${BD_TAG_NAME:-}" ] && { echo "ERROR: BD_TAG_NAME not available"; exit 1; }
+      echo "Starting tag synchronization for: $BD_TAG_NAME"
       
-        if [ -z "$SYNC_TAG" ]; then
-          echo "No published releases found"
-          exit 0
-        fi
-      fi
+      [[ "$BD_TAG_NAME" =~ - ]] && { echo "Skipping prerelease"; exit 0; }
+      [[ ! "$BD_TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && { echo "Invalid format: $BD_TAG_NAME"; exit 0; }
       
-      echo "Syncing tags for: $SYNC_TAG"
+      bd_retry_cmd "git fetch --all --tags --prune"
+      git tag -l | grep -q "^${BD_TAG_NAME}$" || { echo "ERROR: Tag $BD_TAG_NAME not found"; exit 1; }
       
-      # Verify release exists and is published
-      if [ -n "${VERSION:-}" ]; then
-        RELEASE_EXISTS=$(curl -s --header "PRIVATE-TOKEN: $CI_JOB_TOKEN" \
-          "https://${CI_SERVER_HOST}/api/v4/projects/$CI_PROJECT_ID/releases/$SYNC_TAG" 2>/dev/null || echo "null")
+      BD_TAG_COMMIT=$(git rev-list -n 1 "$BD_TAG_NAME")
+      BD_TAG_COMMIT_SHORT=$(git rev-parse --short "$BD_TAG_COMMIT")
+      echo "Target commit: $BD_TAG_COMMIT_SHORT"
       
-        if [ "$RELEASE_EXISTS" = "null" ] || [ "$RELEASE_EXISTS" = "" ]; then
-          echo "ERROR: No release found for tag $SYNC_TAG"
-          exit 1
-        fi
+      for TAG in "v$BD_MAJOR" "latest"; do
+        echo "Syncing tag: $TAG"
+        git tag -d "$TAG" 2>/dev/null || true
+        bd_retry_cmd "git push origin :refs/tags/$TAG" || true
+        MSG=$([ "$TAG" = "latest" ] && echo "Latest stable release: $BD_TAG_NAME" || echo "Major version tag for $BD_TAG_NAME")
+        git tag -a "$TAG" "$BD_TAG_COMMIT" -m "$MSG"
+        bd_retry_cmd "git push origin $TAG"
+        echo "Tag synced: $TAG -> $BD_TAG_COMMIT_SHORT"
+      done
       
-        IS_PUBLISHED=$(echo "$RELEASE_EXISTS" | jq -r '.released_at // empty')
-        if [ -z "$IS_PUBLISHED" ] || [ "$IS_PUBLISHED" = "null" ]; then
-          echo "Release is draft, skipping sync"
-          exit 0
-        fi
-      fi
-      
-      # Skip prereleases
-      if [[ "$SYNC_TAG" =~ - ]]; then
-        echo "Skipping prerelease sync"
-        exit 0
-      fi
-      
-      # Validate format
-      if [[ ! "$SYNC_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo "Invalid release tag format"
-        exit 0
-      fi
-      
-      retry_cmd git fetch --all --tags
-      
-      # Verify tag exists
-      if ! git tag -l | grep -q "^$SYNC_TAG$"; then
-        echo "ERROR: Tag $SYNC_TAG not found"
-        exit 1
-      fi
-      
-      # Get target commit
-      TAG_COMMIT=$(git rev-list -n 1 "$SYNC_TAG")
-      VERSION_NO_V="${SYNC_TAG#v}"
-      IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_NO_V"
-      
-      # Update major tag
-      MAJOR_TAG="v$MAJOR"
-      echo "Updating major tag: $MAJOR_TAG"
-      
-      if git tag -l | grep -q "^$MAJOR_TAG$"; then
-        git tag -d "$MAJOR_TAG"
-        retry_cmd git push origin ":refs/tags/$MAJOR_TAG"
-      fi
-      
-      git tag -a "$MAJOR_TAG" "$TAG_COMMIT" -m "Major version tag for $SYNC_TAG"
-      retry_cmd git push origin "$MAJOR_TAG"
-      
-      # Update latest tag
-      echo "Updating latest tag"
-      
-      if git tag -l | grep -q "^latest$"; then
-        git tag -d "latest"
-        retry_cmd git push origin ":refs/tags/latest"
-      fi
-      
-      git tag -a "latest" "$TAG_COMMIT" -m "Latest stable release: $SYNC_TAG"
-      retry_cmd git push origin "latest"
-      
-      echo "Tags synchronized: $MAJOR_TAG, latest -> ${TAG_COMMIT:0:8}"
+      echo "Tag synchronization completed"
   rules:
-    - if: '$SYNC_TAGS == "true"'
+    - if: '$BD_SYNC_TAGS == "true" && $BD_VERSION != null && $BD_VERSION != ""'
+      when: on_success
+    - if: '$BD_SYNC_TAGS == "true" && $CI_COMMIT_TAG'
+      when: on_success
