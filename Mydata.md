@@ -1,23 +1,99 @@
-Content A:
+Got it ✅ — instead of describing *what happens internally*, you want Content B rewritten into a **step-by-step “How To” guide** for running the release process (with the details from Content A baked in).
 
-**1. Create Tag**
-- Triggered if `$BD_VERSION` or `$CI_COMMIT_TAG` is set.
-- Validates the version format and extracts components.
-- Checks if the tag already exists:
-  - If it exists, skips creation.
-  - If not, creates an annotated tag and pushes it to the remote.
+Here’s the restructured version:
 
-**2. Create Release**
-- Triggered if `$BD_CREATE_RELEASE == "true"` and a valid version/tag is set.
-- Ensures the tag exists.
-- Checks if a release already exists for the tag:
-  - If it exists, skips creation.
-  - If not, creates a new release using the GitLab API.
-- Handles prerelease and published release types.
+---
 
-**3. Sync Tags (latest, major)**
-- Triggered if `$BD_SYNC_TAGS == "true"` and a valid version/tag is set.
-- Skips if the tag is a prerelease or not in `vX.Y.Z` format.
+# Code Freeze and Release Guide
+
+This guide explains how to run the release process using GitLab CI/CD.
+
+---
+
+## **1. Create Tag**
+
+1. Go to **CI/CD > Pipelines** in your GitLab project.
+2. Click **Run Pipeline**.
+3. In the variable input section, enter:
+
+   * `BD_VERSION=vX.Y.Z` (for example, `v1.2.3`).
+4. Run the pipeline.
+5. The pipeline will:
+
+   * Validate the version format.
+   * Create an annotated tag if it does not already exist.
+   * Push the tag to the remote repository.
+
+---
+
+## **2. Create Release**
+
+1. Ensure you already created a tag (see step 1).
+2. Go to **CI/CD > Pipelines**.
+3. Click **Run Pipeline**.
+4. Enter the variables:
+
+   * `BD_VERSION=vX.Y.Z`
+   * `BD_CREATE_RELEASE=true`
+5. Run the pipeline.
+6. The pipeline will:
+
+   * Verify the tag exists.
+   * Create a new release in GitLab if one does not exist already.
+   * Handle prerelease or published release types automatically.
+
+**QA Approval:**
+
+* After the release is created, submit a **SIGINT Jira ticket**.
+* Assign it to **@Suhas LR (Security Champion)**.
+* Attach links to:
+
+  * Pipeline scan results
+  * SBOM (Software Bill of Materials)
+
+---
+
+## **3. Sync Tags (latest, major)**
+
+1. Make sure the release tag is in `vX.Y.Z` format (not a prerelease).
+2. Go to **CI/CD > Pipelines**.
+3. Click **Run Pipeline**.
+4. Enter the variables:
+
+   * `BD_VERSION=vX.Y.Z`
+   * `BD_SYNC_TAGS=true`
+5. Run the pipeline.
+6. The pipeline will:
+
+   * Delete any existing `latest` and `vX` tags locally and remotely.
+   * Recreate them pointing to the current release commit.
+   * Push the tags to the remote repository.
+
+---
+
+## **Pipeline Stages (in order)**
+
+1. `bd_validate_version`
+2. `bd_create_tag`
+3. `bd_create_release`
+4. `bd_sync_tags`
+
+Each stage depends on the previous one and passes variables using artifacts.
+
+---
+
+## **Notes**
+
+* Always run the **Create Tag** step before **Create Release** or **Sync Tags**.
+* Use the same version (`BD_VERSION`) consistently across steps.
+* A valid `CI_JOB_TOKEN` is required for all Git and API operations.
+* All jobs retry automatically if something transient fails.
+
+---
+
+👉 This version is focused on **How to run each step**.
+
+Do you want me to make it even more **checklist-style** (like bullet points you can copy directly into a release runbook), or keep it as structured sections?
 - Fetches all tags and ensures the main tag exists.
 - For each of `v$BD_MAJOR` and `latest`:
   - Deletes the tag locally and remotely if it exists.
