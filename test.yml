@@ -1,7 +1,7 @@
 # ------------------------------------------------------------------------------
 # Workflow: CI-Polaris
 #
-# This workflow performs Polaris SCA/SAST scans on source code.
+# This workflow performs Polaris SCA/SAST scans on source code using the Bridge CLI.
 #
 # Usage:
 #   - uses: <org>/<repo>/.github/workflows/polaris.yml@<ref>
@@ -35,6 +35,97 @@ on:
 
       polaris_branch_name:
         description: 'Optional: Polaris branch name'
+        required: false
+        type: string
+        default: ''
+
+      polaris_assessment_types:
+        description: 'Optional: Assessment types (e.g., SCA,SAST)'
+        required: false
+        type: string
+        default: 'SCA,SAST'
+
+      polaris_prComment_enabled:
+        description: 'Optional: Enable PR comments'
+        required: false
+        type: boolean
+        default: true
+
+      polaris_prComment_severities:
+        description: 'Optional: PR Issue severity'
+        required: false
+        type: string
+        default: 'Critical,High'
+
+      include_diagnostics:
+        description: 'Optional: Include diagnostics'
+        required: false
+        type: boolean
+        default: false
+
+    secrets:
+      POLARIS_ACCESS_TOKEN:
+        description: 'Polaris access token'
+        required: true
+      GITHUB_TOKEN:
+        description: 'GitHub token for PR comments'
+        required: true
+
+jobs:
+  polaris-cli:
+    runs-on: ubuntu-latest
+    env:
+      BRIDGE_POLARIS_SERVERURL: ${{ inputs.polaris_server_url }}
+      BRIDGE_POLARIS_ACCESSTOKEN: ${{ secrets.POLARIS_ACCESS_TOKEN }}
+      BRIDGE_POLARIS_ASSESSMENT_TYPES: ${{ inputs.polaris_assessment_types }}
+
+      BRIDGE_POLARIS_APPLICATION_NAME: ${{ inputs.polaris_application_name || github.repository_owner }}
+      BRIDGE_POLARIS_PROJECT_NAME: ${{ inputs.polaris_project_name || github.event.repository.name }}
+      BRIDGE_POLARIS_BRANCH_NAME: ${{ inputs.polaris_branch_name || github.ref_name }}
+
+      BRIDGE_GITHUB_USER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BRIDGE_GITHUB_REPOSITORY_OWNER_NAME: ${{ github.repository_owner }}
+      BRIDGE_GITHUB_REPOSITORY_NAME: ${{ github.event.repository.name }}
+      BRIDGE_GITHUB_REPOSITORY_BRANCH_NAME: ${{ github.ref_name }}
+
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: 21
+          distribution: temurin
+          cache: maven
+
+      - name: Polaris Full Scan
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          curl -fLsS -o bridge.zip ${{ vars.BRIDGECLI_LINUX64 }} \
+          && unzip -qo -d ${{ runner.temp }} bridge.zip \
+          && rm -f bridge.zip
+          ${{ runner.temp }}/bridge-cli-bundle-linux64/bridge-cli --stage polaris \
+              polaris.reports.sarif.create=true
+
+      - name: Polaris PR Scan
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          curl -fLsS -o bridge.zip ${{ vars.BRIDGECLI_LINUX64 }} \
+          && unzip -qo -d ${{ runner.temp }} bridge.zip \
+          && rm -f bridge.zip
+          ${{ runner.temp }}/bridge-cli-bundle-linux64/bridge-cli --stage polaris \
+              polaris.prcomment.enabled=true \
+              polaris.branch.parent.name=${{ github.event.base_ref }} \
+              github.repository.pull.number=${{ github.event.number }}
+
+      - name: Upload Scan Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: polaris-bridge-results
+          path: ${{ github.workspace }}/.bridge
+          include-hidden-files: true        description: 'Optional: Polaris branch name'
         required: false
         type: string
         default: ''
