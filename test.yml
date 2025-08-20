@@ -20,49 +20,60 @@ on:
         description: 'Polaris server URL'
         required: true
         type: string
-
+ 
       polaris_application_name:
         description: 'Optional: Polaris application name'
         required: false
         type: string
         default: ''
-
+ 
       polaris_project_name:
         description: 'Optional: Polaris project name'
         required: false
         type: string
         default: ''
-
+ 
       polaris_branch_name:
         description: 'Optional: Polaris branch name'
         required: false
         type: string
         default: ''
-
+ 
       polaris_assessment_types:
-        description: 'Optional: Assessment types (e.g., SCA,SAST)'
+        description: 'Assessment types (e.g., SCA,SAST)'
         required: false
         type: string
         default: 'SCA,SAST'
-
+ 
       polaris_prComment_enabled:
-        description: 'Optional: Enable PR comments'
+        description: 'Enable PR comments'
         required: false
         type: boolean
         default: true
-
+ 
       polaris_prComment_severities:
-        description: 'Optional: PR Issue severity'
+        description: 'PR Issue severity'
         required: false
         type: string
         default: 'Critical,High'
-
+ 
       include_diagnostics:
-        description: 'Optional: Include diagnostics'
+        description: 'Include diagnostics'
         required: false
         type: boolean
         default: false
-
+ 
+      bridgecli_linux64:
+        description: 'Bridge CLI Linux 64 URL'
+        required: true
+        type: string
+ 
+      pr_number:
+        description: 'PR number (for PR scan)'
+        required: false
+        type: number
+        default: 0
+ 
     secrets:
       POLARIS_ACCESS_TOKEN:
         description: 'Polaris access token'
@@ -70,7 +81,7 @@ on:
       GITHUB_TOKEN:
         description: 'GitHub token for PR comments'
         required: true
-
+ 
 jobs:
   polaris-cli:
     runs-on: ubuntu-latest
@@ -78,47 +89,37 @@ jobs:
       BRIDGE_POLARIS_SERVERURL: ${{ inputs.polaris_server_url }}
       BRIDGE_POLARIS_ACCESSTOKEN: ${{ secrets.POLARIS_ACCESS_TOKEN }}
       BRIDGE_POLARIS_ASSESSMENT_TYPES: ${{ inputs.polaris_assessment_types }}
-
       BRIDGE_POLARIS_APPLICATION_NAME: ${{ inputs.polaris_application_name || github.repository_owner }}
       BRIDGE_POLARIS_PROJECT_NAME: ${{ inputs.polaris_project_name || github.event.repository.name }}
       BRIDGE_POLARIS_BRANCH_NAME: ${{ inputs.polaris_branch_name || github.ref_name }}
-
       BRIDGE_GITHUB_USER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      BRIDGE_GITHUB_REPOSITORY_OWNER_NAME: ${{ github.repository_owner }}
-      BRIDGE_GITHUB_REPOSITORY_NAME: ${{ github.event.repository.name }}
-      BRIDGE_GITHUB_REPOSITORY_BRANCH_NAME: ${{ github.ref_name }}
-
+      INCLUDE_DIAGNOSTICS: ${{ inputs.include_diagnostics }}
+ 
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
-
-      - name: Setup Java JDK
-        uses: actions/setup-java@v4
-        with:
-          java-version: 21
-          distribution: temurin
-          cache: maven
-
+ 
       - name: Polaris Full Scan
         if: ${{ github.event_name != 'pull_request' }}
         run: |
-          curl -fLsS -o bridge.zip ${{ vars.BRIDGECLI_LINUX64 }} \
+          curl -fLsS -o bridge.zip ${{ inputs.bridgecli_linux64 }} \
           && unzip -qo -d ${{ runner.temp }} bridge.zip \
           && rm -f bridge.zip
           ${{ runner.temp }}/bridge-cli-bundle-linux64/bridge-cli --stage polaris \
               polaris.reports.sarif.create=true
-
+ 
       - name: Polaris PR Scan
         if: ${{ github.event_name == 'pull_request' }}
         run: |
-          curl -fLsS -o bridge.zip ${{ vars.BRIDGECLI_LINUX64 }} \
+          curl -fLsS -o bridge.zip ${{ inputs.bridgecli_linux64 }} \
           && unzip -qo -d ${{ runner.temp }} bridge.zip \
           && rm -f bridge.zip
           ${{ runner.temp }}/bridge-cli-bundle-linux64/bridge-cli --stage polaris \
-              polaris.prcomment.enabled=true \
-              polaris.branch.parent.name=${{ github.event.base_ref }} \
-              github.repository.pull.number=${{ github.event.number }}
-
+              polaris.prcomment.enabled=${{ inputs.polaris_prComment_enabled }} \
+              polaris.prcomment.severities=${{ inputs.polaris_prComment_severities }} \
+              polaris.branch.parent.name=${{ inputs.polaris_branch_name || github.event.base_ref }} \
+              github.repository.pull.number=${{ inputs.pr_number || github.event.number }}
+ 
       - name: Upload Scan Results
         if: always()
         uses: actions/upload-artifact@v4
