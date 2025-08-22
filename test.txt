@@ -1,0 +1,14 @@
+Task: Given the path to a source code repository, identify the primary programming language used and determine the most likely build command.
+
+Instructions:
+
+Scan the repository for key files such as README.md, Makefile, package.json, setup.py, pom.xml, build.gradle, Dockerfile, or any shell scripts.
+Parse these files to extract build-related instructions or commands.
+If a README.md is present, extract any build instructions mentioned.
+Return the most probable build command in a format like:
+"npm run build" for Node.js
+"mvn clean install" for Java
+"make" for C/C++
+"python setup.py build" for Python
+If multiple build options are found, rank them by relevance or popularity.
+If no build command is found, return "No build command detected".
