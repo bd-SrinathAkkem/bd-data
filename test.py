@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 JIRA Ticket Creation Chatbot with Teams Integration and AI Enhancement
@@ -57,11 +56,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 class AIAgent(str, Enum):
     """Supported AI agents for description enhancement."""
     CLAUDE = "claude"
     OPENAI = "openai"
     NONE = "none"
+
 
 class IssueType(str, Enum):
     """JIRA issue types."""
@@ -72,6 +73,7 @@ class IssueType(str, Enum):
     SUBTASK = "Sub-task"
     IMPROVEMENT = "Improvement"
 
+
 class Priority(str, Enum):
     """JIRA priority levels."""
     HIGHEST = "Highest"
@@ -79,6 +81,7 @@ class Priority(str, Enum):
     MEDIUM = "Medium"
     LOW = "Low"
     LOWEST = "Lowest"
+
 
 @dataclass
 class JiraConfig:
@@ -90,11 +93,13 @@ class JiraConfig:
     team_custom_field: Optional[str] = 'customfield_10010'
     timeout: int = 30
 
+
 @dataclass
 class TeamsConfig:
     """Microsoft Teams webhook configuration."""
     webhook_url: Optional[str] = None
     enabled: bool = False
+
 
 @dataclass
 class AIConfig:
@@ -102,6 +107,7 @@ class AIConfig:
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     default_agent: AIAgent = AIAgent.NONE
+
 
 class JiraTicketRequest(BaseModel):
     """Request model for JIRA ticket creation."""
@@ -132,7 +138,6 @@ class JiraTicketRequest(BaseModel):
     # Notification options
     notify_teams: bool = Field(False, description="Send Teams notification")
 
-    @field_validator('labels')
     def validate_labels(cls, v):
         """Validate and clean labels."""
         if v:
@@ -143,6 +148,7 @@ class JiraTicketRequest(BaseModel):
     def validate_summary(cls, v):
         """Validate and clean summary."""
         return v.strip()
+
 
 class JiraTicketResponse(BaseModel):
     """Response model for JIRA ticket creation."""
@@ -156,6 +162,7 @@ class JiraTicketResponse(BaseModel):
     teams_notification_sent: bool = False
     errors: Optional[List[str]] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
 
 class AIDescriptionEnhancer:
     """Handles AI-powered description enhancement for JIRA tickets."""
@@ -179,9 +186,9 @@ class AIDescriptionEnhancer:
             self.anthropic_client = anthropic.Anthropic(api_key=config.anthropic_api_key)
 
     async def enhance_description(
-        self,
-        ticket_data: JiraTicketRequest,
-        agent: AIAgent = AIAgent.CLAUDE
+            self,
+            ticket_data: JiraTicketRequest,
+            agent: AIAgent = AIAgent.CLAUDE
     ) -> Dict[str, Union[str, List[str]]]:
         """
         Enhance ticket description using selected AI agent.
@@ -283,6 +290,7 @@ Respond with a JSON object containing:
                 "suggestions": ["Response was not in expected JSON format"]
             }
 
+
 class TeamsNotifier:
     """Handles notifications to Microsoft Teams."""
 
@@ -297,10 +305,10 @@ class TeamsNotifier:
         self.webhook_url = config.webhook_url
 
     async def send_ticket_notification(
-        self,
-        ticket_key: str,
-        ticket_url: str,
-        ticket_data: JiraTicketRequest
+            self,
+            ticket_key: str,
+            ticket_url: str,
+            ticket_data: JiraTicketRequest
     ) -> bool:
         """
         Send notification about new ticket to Teams channel.
@@ -348,8 +356,6 @@ class TeamsNotifier:
                 facts.append(("Labels", ", ".join(ticket_data.labels)))
             if ticket_data.components:
                 facts.append(("Components", ", ".join(ticket_data.components)))
-            if ticket_data.team:
-                facts.append(("Team", ticket_data.team))
 
             for name, value in facts:
                 card_section.addFact(name, value)
@@ -365,16 +371,17 @@ class TeamsNotifier:
             logger.error(f"Failed to send Teams notification for {ticket_key}: {str(e)}")
             return False
 
+
 class JiraChatbot:
     """
     Main class for JIRA ticket creation with enhancements.
     """
 
     def __init__(
-        self,
-        jira_config: JiraConfig,
-        teams_config: Optional[TeamsConfig] = None,
-        ai_config: Optional[AIConfig] = None
+            self,
+            jira_config: JiraConfig,
+            teams_config: Optional[TeamsConfig] = None,
+            ai_config: Optional[AIConfig] = None
     ):
         """
         Initialize the JIRA Chatbot.
@@ -449,7 +456,6 @@ class JiraChatbot:
                     ticket_request.description = enhanced_data["enhanced_description"]
 
             issue_data = self._prepare_issue_data(ticket_request)
-            logger.debug(f"Issue data: {issue_data}")
 
             if ticket_request.assign_to_current_sprint:
                 sprint_id = await self.get_active_sprint(ticket_request.project)
@@ -697,6 +703,7 @@ class JiraChatbot:
 
         return status
 
+
 def create_app() -> FastAPI:
     """
     Create and configure the FastAPI application.
@@ -778,4 +785,8 @@ def create_app() -> FastAPI:
 
     return app
 
-app = create_app()
+# For running directly if needed
+if __name__ == "__main__":
+    import uvicorn
+    app = create_app()
+    uvicorn.run(app, host="0.0.0.0", port=8000)
