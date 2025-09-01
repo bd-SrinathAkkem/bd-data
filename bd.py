@@ -3,7 +3,7 @@
 JIRA Ticket Creation Chatbot with Teams Integration and AI Enhancement
 
 This module provides a comprehensive solution for creating JIRA tickets with optional
-Microsoft Teams notifications and AI-powered description enhancement.
+Microsoft Teams notifications, AI-powered description enhancement, and sprint support.
 
 Author: AI Assistant
 Version: 1.0.0
@@ -16,17 +16,17 @@ import logging
 import asyncio
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Union, Literal
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from enum import Enum
+from concurrent.futures import ThreadPoolExecutor
 
 # Third-party imports
 import httpx
 import pymsteams
 from atlassian import Jira
-from pydantic import BaseModel, Field, validator
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from pydantic import BaseModel, Field, field_validator
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer
 from dotenv import load_dotenv
 
 # AI Libraries (conditional imports)
@@ -89,6 +89,7 @@ class JiraConfig:
     url: str
     username: str
     api_token: str
+    sprint_custom_field: Optional[str] = 'customfield_10020'
     timeout: int = 30
 
 
@@ -109,12 +110,12 @@ class AIConfig:
 
 class JiraTicketRequest(BaseModel):
     """Request model for JIRA ticket creation."""
-    
+
     # Required fields
     summary: str = Field(..., min_length=1, max_length=255, description="Brief ticket summary")
     project: str = Field(..., min_length=1, description="JIRA project key")
     issue_type: IssueType = Field(..., description="Type of issue")
-    
+
     # Optional fields
     description: Optional[str] = Field(None, description="Detailed description")
     priority: Priority = Field(Priority.MEDIUM, description="Issue priority")
@@ -123,21 +124,26 @@ class JiraTicketRequest(BaseModel):
     labels: Optional[List[str]] = Field(default_factory=list, description="Issue labels")
     components: Optional[List[str]] = Field(default_factory=list, description="Project components")
     fix_versions: Optional[List[str]] = Field(default_factory=list, description="Fix versions")
-    custom_fields: Optional[Dict[str, str]] = Field(default_factory=dict, description="Custom fields")
-    
-    # Options
+    custom_fields: Optional[Dict[str, Union[str, int, List]]] = Field(default_factory=dict, description="Custom fields")
+
+    # Sprint options
+    assign_to_current_sprint: bool = Field(False, description="Assign to current active sprint")
+
+    # AI options
     enhance_with_ai: bool = Field(False, description="Enable AI description enhancement")
     ai_agent: AIAgent = Field(AIAgent.CLAUDE, description="AI agent for enhancement")
+
+    # Notification options
     notify_teams: bool = Field(False, description="Send Teams notification")
-    
-    @validator('labels')
+
+    @field_validator('labels')
     def validate_labels(cls, v):
         """Validate and clean labels."""
         if v:
             return [label.strip() for label in v if label.strip()]
         return []
-    
-    @validator('summary')
+
+    @field_validator('summary')
     def validate_summary(cls, v):
         """Validate and clean summary."""
         return v.strip()
@@ -145,7 +151,7 @@ class JiraTicketRequest(BaseModel):
 
 class JiraTicketResponse(BaseModel):
     """Response model for JIRA ticket creation."""
-    
+
     success: bool
     ticket_key: Optional[str] = None
     ticket_url: Optional[str] = None
@@ -159,71 +165,65 @@ class JiraTicketResponse(BaseModel):
 
 class AIDescriptionEnhancer:
     """Handles AI-powered description enhancement for JIRA tickets."""
-    
+
     def __init__(self, config: AIConfig):
         """
         Initialize AI enhancer with configuration.
-        
+
         Args:
             config: AI configuration settings
         """
         self.config = config
         self.openai_client = None
         self.anthropic_client = None
-        
-        # Initialize AI clients
+
+        # Initialize AI clients if available
         if OPENAI_AVAILABLE and config.openai_api_key:
             self.openai_client = openai.OpenAI(api_key=config.openai_api_key)
-        
+
         if ANTHROPIC_AVAILABLE and config.anthropic_api_key:
             self.anthropic_client = anthropic.Anthropic(api_key=config.anthropic_api_key)
-    
+
     async def enhance_description(
-        self, 
-        ticket_data: JiraTicketRequest, 
+        self,
+        ticket_data: JiraTicketRequest,
         agent: AIAgent = AIAgent.CLAUDE
     ) -> Dict[str, Union[str, List[str]]]:
         """
-        Enhance ticket description using AI.
-        
+        Enhance ticket description using selected AI agent.
+
         Args:
             ticket_data: Original ticket data
             agent: AI agent to use
-            
+
         Returns:
             Dictionary containing enhanced description and suggestions
         """
+        if agent == AIAgent.NONE or (agent == AIAgent.CLAUDE and not self.anthropic_client) or (agent == AIAgent.OPENAI and not self.openai_client):
+            logger.info(f"AI enhancement skipped or not available for agent: {agent}")
+            return {
+                "enhanced_description": ticket_data.description or "",
+                "suggestions": []
+            }
+
+        prompt = self._build_enhancement_prompt(ticket_data)
+
         try:
-            if agent == AIAgent.NONE:
-                return {
-                    "enhanced_description": ticket_data.description or "",
-                    "suggestions": []
-                }
-            
-            prompt = self._build_enhancement_prompt(ticket_data)
-            
-            if agent == AIAgent.CLAUDE and self.anthropic_client:
+            if agent == AIAgent.CLAUDE:
                 return await self._enhance_with_claude(prompt)
-            elif agent == AIAgent.OPENAI and self.openai_client:
+            elif agent == AIAgent.OPENAI:
                 return await self._enhance_with_openai(prompt)
-            else:
-                logger.warning(f"AI agent {agent} not available, returning original description")
-                return {
-                    "enhanced_description": ticket_data.description or "",
-                    "suggestions": ["AI enhancement not available"]
-                }
-        
         except Exception as e:
-            logger.error(f"AI enhancement failed: {str(e)}")
+            logger.error(f"AI enhancement failed for {agent}: {str(e)}")
             return {
                 "enhanced_description": ticket_data.description or "",
                 "suggestions": [f"AI enhancement failed: {str(e)}"]
             }
-    
+
     def _build_enhancement_prompt(self, ticket_data: JiraTicketRequest) -> str:
-        """Build enhancement prompt for AI."""
+        """Build prompt for AI description enhancement."""
         return f"""
-You are a professional JIRA ticket writer. Please enhance the following ticket information:
+You are a professional JIRA ticket writer. Enhance the following ticket information:
 
 **Ticket Information:**
 - Summary: {ticket_data.summary}
@@ -234,526 +234,495 @@ You are a professional JIRA ticket writer. Please enhance the following ticket i
 - Components: {', '.join(ticket_data.components) if ticket_data.components else 'None'}
 
 **Requirements:**
-1. Provide a clear, detailed, and professional description
-2. Include acceptance criteria if applicable
-3. Suggest any missing information
-4. Use proper formatting for JIRA (bullet points, numbered lists)
-5. Keep it concise but comprehensive
+1. Provide a clear, detailed, and professional description.
+2. Include acceptance criteria if applicable.
+3. Suggest any missing information or improvements.
+4. Use proper JIRA formatting (e.g., bullet points, numbered lists, code blocks).
+5. Keep it concise yet comprehensive.
 
-Please respond with a JSON object containing:
-- "enhanced_description": The improved description
-- "suggestions": Array of suggestions for improvement
+Respond with a JSON object containing:
+- "enhanced_description": The improved description (string)
+- "suggestions": Array of suggestion strings
 """
-    
+
     async def _enhance_with_claude(self, prompt: str) -> Dict[str, Union[str, List[str]]]:
-        """Enhance description using Claude."""
-        try:
-            message = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.anthropic_client.messages.create(
-                    model="claude-3-sonnet-20240229",
-                    max_tokens=1000,
-                    messages=[{"role": "user", "content": prompt}]
-                )
+        """Enhance description using Anthropic's Claude model."""
+        loop = asyncio.get_event_loop()
+        message = await loop.run_in_executor(
+            None,
+            lambda: self.anthropic_client.messages.create(
+                model="claude-3-sonnet-20240229",
+                max_tokens=1000,
+                messages=[{"role": "user", "content": prompt}]
             )
-            
-            response_text = message.content[0].text
-            # Try to parse as JSON, fallback to text
-            try:
-                result = json.loads(response_text)
-                return {
-                    "enhanced_description": result.get("enhanced_description", ""),
-                    "suggestions": result.get("suggestions", [])
-                }
-            except json.JSONDecodeError:
-                return {
-                    "enhanced_description": response_text,
-                    "suggestions": ["Response parsing completed successfully"]
-                }
-        
-        except Exception as e:
-            logger.error(f"Claude enhancement failed: {str(e)}")
-            raise
-    
+        )
+        response_text = message.content[0].text
+        return self._parse_ai_response(response_text)
+
     async def _enhance_with_openai(self, prompt: str) -> Dict[str, Union[str, List[str]]]:
-        """Enhance description using OpenAI."""
-        try:
-            response = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.openai_client.chat.completions.create(
-                    model="gpt-4",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=1000,
-                    temperature=0.7
-                )
+        """Enhance description using OpenAI's GPT model."""
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: self.openai_client.chat.completions.create(
+                model="gpt-4",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1000,
+                temperature=0.7
             )
-            
-            response_text = response.choices[0].message.content
-            # Try to parse as JSON, fallback to text
-            try:
-                result = json.loads(response_text)
-                return {
-                    "enhanced_description": result.get("enhanced_description", ""),
-                    "suggestions": result.get("suggestions", [])
-                }
-            except json.JSONDecodeError:
-                return {
-                    "enhanced_description": response_text,
-                    "suggestions": ["Response parsing completed successfully"]
-                }
-        
-        except Exception as e:
-            logger.error(f"OpenAI enhancement failed: {str(e)}")
-            raise
+        )
+        response_text = response.choices[0].message.content
+        return self._parse_ai_response(response_text)
+
+    def _parse_ai_response(self, response_text: str) -> Dict[str, Union[str, List[str]]]:
+        """Parse AI response text to extract enhanced description and suggestions."""
+        try:
+            result = json.loads(response_text)
+            return {
+                "enhanced_description": result.get("enhanced_description", ""),
+                "suggestions": result.get("suggestions", [])
+            }
+        except json.JSONDecodeError:
+            logger.warning("AI response not valid JSON, using raw text as description")
+            return {
+                "enhanced_description": response_text.strip(),
+                "suggestions": ["Response was not in expected JSON format"]
+            }
 
 
 class TeamsNotifier:
-    """Handles Microsoft Teams notifications."""
-    
+    """Handles notifications to Microsoft Teams."""
+
     def __init__(self, config: TeamsConfig):
         """
-        Initialize Teams notifier.
-        
+        Initialize Teams notifier with configuration.
+
         Args:
-            config: Teams configuration
+            config: Teams configuration settings
         """
         self.config = config
         self.webhook_url = config.webhook_url
-    
+
     async def send_ticket_notification(
-        self, 
-        ticket_key: str, 
-        ticket_url: str, 
+        self,
+        ticket_key: str,
+        ticket_url: str,
         ticket_data: JiraTicketRequest
     ) -> bool:
         """
-        Send ticket creation notification to Teams.
-        
+        Send notification about new ticket to Teams channel.
+
         Args:
             ticket_key: JIRA ticket key
-            ticket_url: JIRA ticket URL
-            ticket_data: Original ticket data
-            
+            ticket_url: Full URL to the ticket
+            ticket_data: Ticket creation data
+
         Returns:
-            True if notification sent successfully
+            True if notification was sent successfully, False otherwise
         """
         if not self.config.enabled or not self.webhook_url:
+            logger.info("Teams notifications disabled or webhook not configured")
             return False
-        
+
         try:
-            # Create Teams message
             teams_message = pymsteams.connectorcard(self.webhook_url)
-            
-            # Set title and summary
-            teams_message.title(f"New JIRA Ticket Created: {ticket_key}")
-            teams_message.summary(f"JIRA ticket {ticket_key} has been created")
-            
-            # Set color based on priority
+            teams_message.title(f"New JIRA Ticket: {ticket_key}")
+            teams_message.summary(f"Ticket {ticket_key} created in {ticket_data.project}")
+
             color_map = {
-                Priority.HIGHEST: "FF0000",  # Red
-                Priority.HIGH: "FF8C00",     # Orange
-                Priority.MEDIUM: "FFD700",   # Yellow
-                Priority.LOW: "32CD32",      # Green
-                Priority.LOWEST: "87CEEB"    # Light Blue
+                Priority.HIGHEST: "FF0000",
+                Priority.HIGH: "FF8C00",
+                Priority.MEDIUM: "FFD700",
+                Priority.LOW: "32CD32",
+                Priority.LOWEST: "87CEEB"
             }
             teams_message.color(color_map.get(ticket_data.priority, "FFD700"))
-            
-            # Add main card section
+
             card_section = pymsteams.cardsection()
-            card_section.activityTitle(f"📋 {ticket_data.summary}")
-            card_section.activitySubtitle(f"Type: {ticket_data.issue_type} | Priority: {ticket_data.priority}")
-            
+            card_section.activityTitle(ticket_data.summary)
+            card_section.activitySubtitle(f"{ticket_data.issue_type.value} | Priority: {ticket_data.priority.value}")
+
             if ticket_data.description:
-                description = ticket_data.description
-                if len(description) > 200:
-                    description = description[:200] + "..."
-                card_section.activityText(description)
-            
-            # Add facts
+                desc_preview = ticket_data.description[:200] + "..." if len(ticket_data.description) > 200 else ticket_data.description
+                card_section.activityText(desc_preview)
+
             facts = []
             if ticket_data.assignee:
                 facts.append(("Assignee", ticket_data.assignee))
+            if ticket_data.reporter:
+                facts.append(("Reporter", ticket_data.reporter))
             if ticket_data.labels:
                 facts.append(("Labels", ", ".join(ticket_data.labels)))
             if ticket_data.components:
                 facts.append(("Components", ", ".join(ticket_data.components)))
-            
+
             for name, value in facts:
                 card_section.addFact(name, value)
-            
+
             teams_message.addSection(card_section)
-            
-            # Add action button
-            teams_message.addLinkButton("View Ticket", ticket_url)
-            
-            # Send message
-            teams_message.send()
-            logger.info(f"Teams notification sent for ticket {ticket_key}")
+            teams_message.addLinkButton("View in JIRA", ticket_url)
+
+            await asyncio.get_event_loop().run_in_executor(None, teams_message.send)
+            logger.info(f"Teams notification sent for {ticket_key}")
             return True
-        
+
         except Exception as e:
-            logger.error(f"Failed to send Teams notification: {str(e)}")
+            logger.error(f"Failed to send Teams notification for {ticket_key}: {str(e)}")
             return False
 
 
 class JiraChatbot:
     """
-    Professional JIRA Ticket Creation Chatbot.
-    
-    This class provides a comprehensive solution for creating JIRA tickets with
-    optional AI enhancement and Teams notifications.
+    Main class for JIRA ticket creation with enhancements.
     """
-    
+
     def __init__(
         self,
         jira_config: JiraConfig,
-        teams_config: TeamsConfig = None,
-        ai_config: AIConfig = None
+        teams_config: Optional[TeamsConfig] = None,
+        ai_config: Optional[AIConfig] = None
     ):
         """
         Initialize the JIRA Chatbot.
-        
+
         Args:
-            jira_config: JIRA connection configuration
-            teams_config: Teams notification configuration (optional)
-            ai_config: AI enhancement configuration (optional)
+            jira_config: JIRA connection settings
+            teams_config: Teams notification settings (optional)
+            ai_config: AI enhancement settings (optional)
         """
         self.jira_config = jira_config
         self.teams_config = teams_config or TeamsConfig()
         self.ai_config = ai_config or AIConfig()
-        
-        # Initialize JIRA client
+
         self.jira = Jira(
             url=jira_config.url,
             username=jira_config.username,
             password=jira_config.api_token,
             cloud=True
         )
-        
-        # Initialize optional components
+
         self.ai_enhancer = AIDescriptionEnhancer(self.ai_config)
         self.teams_notifier = TeamsNotifier(self.teams_config)
-        
-        logger.info("JIRA Chatbot initialized successfully")
-    
+
+        self.executor = ThreadPoolExecutor(max_workers=5)
+
+        logger.info("JIRA Chatbot initialized")
+
     async def create_ticket(self, ticket_request: JiraTicketRequest) -> JiraTicketResponse:
         """
-        Create a JIRA ticket with optional enhancements.
-        
+        Create a new JIRA ticket with optional AI enhancement, sprint assignment, and Teams notification.
+
         Args:
-            ticket_request: Ticket creation request
-            
+            ticket_request: Ticket creation request data
+
         Returns:
-            JiraTicketResponse with creation results
+            Response with ticket details or error information
         """
+        errors = []
         try:
-            logger.info(f"Creating JIRA ticket: {ticket_request.summary}")
-            
-            # Validate project and issue type
             await self._validate_ticket_request(ticket_request)
-            
-            # Enhance description with AI if requested
+
             enhanced_data = None
             if ticket_request.enhance_with_ai:
                 enhanced_data = await self.ai_enhancer.enhance_description(
-                    ticket_request, ticket_request.ai_agent
+                    ticket_request,
+                    ticket_request.ai_agent
                 )
-                if enhanced_data.get("enhanced_description"):
+                if enhanced_data["enhanced_description"]:
                     ticket_request.description = enhanced_data["enhanced_description"]
-            
-            # Prepare issue data
+
             issue_data = self._prepare_issue_data(ticket_request)
-            
-            # Create JIRA issue
-            issue = self.jira.create_issue(fields=issue_data)
+
+            if ticket_request.assign_to_current_sprint:
+                sprint_id = await self.get_active_sprint(ticket_request.project)
+                if sprint_id:
+                    sprint_field = self.jira_config.sprint_custom_field
+                    issue_data[sprint_field] = [sprint_id]
+                else:
+                    errors.append("No active sprint found; ticket created without sprint assignment")
+                    logger.warning(f"No active sprint for project {ticket_request.project}")
+
+            loop = asyncio.get_event_loop()
+            issue = await loop.run_in_executor(
+                self.executor,
+                lambda: self.jira.create_issue(fields=issue_data)
+            )
+
             ticket_key = issue.key
             ticket_url = f"{self.jira_config.url}/browse/{ticket_key}"
-            
-            logger.info(f"JIRA ticket created successfully: {ticket_key}")
-            
-            # Send Teams notification if requested
+
             teams_sent = False
             if ticket_request.notify_teams:
                 teams_sent = await self.teams_notifier.send_ticket_notification(
                     ticket_key, ticket_url, ticket_request
                 )
-            
-            # Prepare response
-            response = JiraTicketResponse(
+
+            return JiraTicketResponse(
                 success=True,
                 ticket_key=ticket_key,
                 ticket_url=ticket_url,
-                message=f"JIRA ticket {ticket_key} created successfully",
+                message="Ticket created successfully",
                 enhanced_description=enhanced_data.get("enhanced_description") if enhanced_data else None,
-                ai_suggestions=enhanced_data.get("suggestions", []) if enhanced_data else None,
-                teams_notification_sent=teams_sent
+                ai_suggestions=enhanced_data.get("suggestions") if enhanced_data else None,
+                teams_notification_sent=teams_sent,
+                errors=errors if errors else None
             )
-            
-            return response
-        
+
+        except ValueError as ve:
+            errors.append(str(ve))
         except Exception as e:
-            logger.error(f"Failed to create JIRA ticket: {str(e)}")
-            return JiraTicketResponse(
-                success=False,
-                message="Failed to create JIRA ticket",
-                errors=[str(e)]
-            )
-    
+            errors.append(f"Unexpected error: {str(e)}")
+            logger.error(f"Ticket creation failed: {str(e)}")
+
+        return JiraTicketResponse(
+            success=False,
+            message="Ticket creation failed",
+            errors=errors
+        )
+
     async def _validate_ticket_request(self, ticket_request: JiraTicketRequest) -> None:
-        """
-        Validate ticket request against JIRA configuration.
-        
-        Args:
-            ticket_request: Ticket request to validate
-            
-        Raises:
-            ValueError: If validation fails
-        """
-        try:
-            # Validate project exists
-            project = self.jira.project(ticket_request.project)
-            if not project:
-                raise ValueError(f"Project '{ticket_request.project}' not found")
-            
-            # Validate issue type exists in project
-            issue_types = [it.name for it in project.issueTypes]
-            if ticket_request.issue_type not in issue_types:
-                raise ValueError(
-                    f"Issue type '{ticket_request.issue_type}' not available in project. "
-                    f"Available types: {', '.join(issue_types)}"
-                )
-            
-            logger.info(f"Ticket request validated successfully for project {ticket_request.project}")
-        
-        except Exception as e:
-            logger.error(f"Ticket validation failed: {str(e)}")
-            raise ValueError(f"Ticket validation failed: {str(e)}")
-    
+        """Validate ticket request against JIRA."""
+        loop = asyncio.get_event_loop()
+        project = await loop.run_in_executor(
+            self.executor,
+            lambda: self.jira.project(ticket_request.project)
+        )
+        if not project:
+            raise ValueError(f"Project '{ticket_request.project}' does not exist")
+
+        issue_types = [it.name for it in project.issueTypes]
+        if ticket_request.issue_type.value not in issue_types:
+            raise ValueError(f"Issue type '{ticket_request.issue_type}' not available. Available: {', '.join(issue_types)}")
+
     def _prepare_issue_data(self, ticket_request: JiraTicketRequest) -> Dict:
-        """
-        Prepare JIRA issue data from ticket request.
-        
-        Args:
-            ticket_request: Ticket request data
-            
-        Returns:
-            Dictionary formatted for JIRA API
-        """
+        """Prepare data dictionary for JIRA issue creation."""
         issue_data = {
             'project': {'key': ticket_request.project},
             'summary': ticket_request.summary,
-            'issuetype': {'name': ticket_request.issue_type},
-            'priority': {'name': ticket_request.priority}
+            'issuetype': {'name': ticket_request.issue_type.value},
+            'priority': {'name': ticket_request.priority.value}
         }
-        
-        # Add optional fields
+
         if ticket_request.description:
             issue_data['description'] = ticket_request.description
-        
         if ticket_request.assignee:
-            issue_data['assignee'] = {'name': ticket_request.assignee}
-        
+            issue_data['assignee'] = {'accountId': ticket_request.assignee}  # Assuming cloud, use accountId; adjust if needed
         if ticket_request.reporter:
-            issue_data['reporter'] = {'name': ticket_request.reporter}
-        
+            issue_data['reporter'] = {'accountId': ticket_request.reporter}
         if ticket_request.labels:
             issue_data['labels'] = ticket_request.labels
-        
         if ticket_request.components:
             issue_data['components'] = [{'name': comp} for comp in ticket_request.components]
-        
         if ticket_request.fix_versions:
             issue_data['fixVersions'] = [{'name': ver} for ver in ticket_request.fix_versions]
-        
-        # Add custom fields
         if ticket_request.custom_fields:
             issue_data.update(ticket_request.custom_fields)
-        
+
         return issue_data
-    
-    async def get_project_metadata(self, project_key: str) -> Dict:
+
+    async def get_active_sprint(self, project_key: str) -> Optional[int]:
         """
-        Get project metadata including available issue types and components.
-        
+        Get the ID of the active sprint for the project.
+
+        Assumes the first board and first active sprint.
+
         Args:
             project_key: JIRA project key
-            
+
         Returns:
-            Dictionary containing project metadata
+            Active sprint ID or None if not found
         """
         try:
-            project = self.jira.project(project_key)
-            
+            loop = asyncio.get_event_loop()
+            boards = await loop.run_in_executor(
+                self.executor,
+                lambda: self.jira.get_all_agile_boards(projectKey=project_key)
+            )
+            if not boards.get('values'):
+                return None
+
+            board_id = boards['values'][0]['id']
+
+            sprints = await loop.run_in_executor(
+                self.executor,
+                lambda: self.jira.get_all_sprints(board_id, state='active')
+            )
+            if not sprints.get('values'):
+                return None
+
+            return sprints['values'][0]['id']
+
+        except Exception as e:
+            logger.error(f"Failed to get active sprint for {project_key}: {str(e)}")
+            return None
+
+    async def get_project_metadata(self, project_key: str) -> Dict:
+        """
+        Retrieve metadata for a JIRA project including current sprint.
+
+        Args:
+            project_key: JIRA project key
+
+        Returns:
+            Dictionary with project metadata
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            project = await loop.run_in_executor(
+                self.executor,
+                lambda: self.jira.project(project_key)
+            )
+
             metadata = {
                 'key': project.key,
                 'name': project.name,
                 'description': getattr(project, 'description', ''),
                 'issue_types': [it.name for it in project.issueTypes],
-                'components': [comp.name for comp in project.components],
-                'versions': [ver.name for ver in project.versions]
+                'components': [comp.name for comp in project.components] if hasattr(project, 'components') else [],
+                'versions': [ver.name for ver in project.versions] if hasattr(project, 'versions') else []
             }
-            
+
+            sprint_id = await self.get_active_sprint(project_key)
+            if sprint_id:
+                sprint = await loop.run_in_executor(
+                    self.executor,
+                    lambda: self.jira.get_sprint(sprint_id)
+                )
+                metadata['current_sprint'] = {
+                    'id': sprint['id'],
+                    'name': sprint['name'],
+                    'state': sprint['state']
+                }
+            else:
+                metadata['current_sprint'] = None
+
             return metadata
-        
+
         except Exception as e:
-            logger.error(f"Failed to get project metadata: {str(e)}")
+            logger.error(f"Failed to get metadata for {project_key}: {str(e)}")
             raise ValueError(f"Failed to get project metadata: {str(e)}")
-    
+
     async def health_check(self) -> Dict[str, Union[bool, str]]:
         """
-        Perform health check on all services.
-        
+        Check health of connected services.
+
         Returns:
-            Dictionary containing health status
+            Dictionary with health statuses
         """
         status = {
             'jira': False,
-            'teams': False,
-            'ai_claude': False,
-            'ai_openai': False,
+            'teams': self.teams_config.enabled,
+            'ai_claude': ANTHROPIC_AVAILABLE and bool(self.ai_config.anthropic_api_key),
+            'ai_openai': OPENAI_AVAILABLE and bool(self.ai_config.openai_api_key),
             'overall': False
         }
-        
-        # Check JIRA connection
+
         try:
-            self.jira.myself()
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                self.executor,
+                lambda: self.jira.myself()
+            )
             status['jira'] = True
         except Exception as e:
-            logger.error(f"JIRA health check failed: {str(e)}")
-        
-        # Check Teams webhook
-        if self.teams_config.enabled and self.teams_config.webhook_url:
+            logger.error(f"JIRA connection check failed: {str(e)}")
+
+        if status['teams'] and self.teams_config.webhook_url:
             try:
-                # Simple webhook test (just check if URL is accessible)
                 async with httpx.AsyncClient() as client:
-                    response = await client.get(self.teams_config.webhook_url.split('/')[2])
-                    status['teams'] = response.status_code < 500
+                    resp = await client.head(self.teams_config.webhook_url, timeout=5)
+                    status['teams'] = resp.status_code < 400
             except Exception as e:
-                logger.error(f"Teams health check failed: {str(e)}")
-        
-        # Check AI services
-        if self.ai_enhancer.anthropic_client:
-            status['ai_claude'] = True
-        
-        if self.ai_enhancer.openai_client:
-            status['ai_openai'] = True
-        
-        status['overall'] = status['jira']  # JIRA is the core requirement
-        
+                status['teams'] = False
+                logger.error(f"Teams webhook check failed: {str(e)}")
+
+        status['overall'] = status['jira']
+
         return status
 
 
-# FastAPI Application Setup
 def create_app() -> FastAPI:
     """
-    Create and configure FastAPI application.
-    
+    Create and configure the FastAPI application.
+
     Returns:
-        Configured FastAPI application
+        Configured FastAPI instance
     """
-    # Load configuration from environment
     jira_config = JiraConfig(
         url=os.getenv('JIRA_URL', ''),
         username=os.getenv('JIRA_USERNAME', ''),
-        api_token=os.getenv('JIRA_API_TOKEN', '')
+        api_token=os.getenv('JIRA_API_TOKEN', ''),
+        sprint_custom_field=os.getenv('JIRA_SPRINT_CUSTOM_FIELD', 'customfield_10020')
     )
-    
+
     teams_config = TeamsConfig(
         webhook_url=os.getenv('TEAMS_WEBHOOK_URL'),
         enabled=bool(os.getenv('TEAMS_WEBHOOK_URL'))
     )
-    
+
     ai_config = AIConfig(
         openai_api_key=os.getenv('OPENAI_API_KEY'),
         anthropic_api_key=os.getenv('ANTHROPIC_API_KEY'),
-        default_agent=AIAgent(os.getenv('DEFAULT_AI_AGENT', 'claude'))
+        default_agent=AIAgent(os.getenv('DEFAULT_AI_AGENT', 'none'))
     )
-    
-    # Validate required configuration
-    if not all([jira_config.url, jira_config.username, jira_config.api_token]):
-        raise ValueError("Missing required JIRA configuration")
-    
-    # Initialize chatbot
+
+    if not (jira_config.url and jira_config.username and jira_config.api_token):
+        raise ValueError("Missing required JIRA configuration variables")
+
     chatbot = JiraChatbot(jira_config, teams_config, ai_config)
-    
-    # Create FastAPI app
+
     app = FastAPI(
-        title="JIRA Ticket Creation Chatbot",
-        description="Professional JIRA ticket creation with AI enhancement and Teams notifications",
+        title="JIRA Ticket Creation API",
+        description="API for creating JIRA tickets with AI enhancements and notifications",
         version="1.0.0"
     )
-    
-    # Add CORS middleware
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=os.getenv('ALLOWED_ORIGINS', '*').split(','),
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_methods=["*"],
         allow_headers=["*"],
     )
-    
-    # API Routes
+
     @app.post("/tickets", response_model=JiraTicketResponse)
-    async def create_ticket(
-        ticket_request: JiraTicketRequest,
-        background_tasks: BackgroundTasks
-    ):
-        """Create a new JIRA ticket with optional enhancements."""
-        response = await chatbot.create_ticket(ticket_request)
-        return response
-    
+    async def create_jira_ticket(ticket_request: JiraTicketRequest):
+        """Create a new JIRA ticket."""
+        return await chatbot.create_ticket(ticket_request)
+
     @app.get("/projects/{project_key}/metadata")
-    async def get_project_metadata(project_key: str):
-        """Get project metadata including available issue types and components."""
+    async def get_project_metadata_endpoint(project_key: str):
+        """Get metadata for a specific project."""
         try:
             metadata = await chatbot.get_project_metadata(project_key)
             return {"success": True, "data": metadata}
+        except ValueError as ve:
+            raise HTTPException(status_code=404, detail=str(ve))
         except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
-    
+            raise HTTPException(status_code=500, detail="Internal server error")
+
     @app.get("/health")
-    async def health_check():
-        """Perform health check on all services."""
-        status = await chatbot.health_check()
-        return status
-    
+    async def health_check_endpoint():
+        """Check service health."""
+        return await chatbot.health_check()
+
     @app.get("/")
     async def root():
-        """Root endpoint with API information."""
+        """API root endpoint."""
         return {
-            "name": "JIRA Ticket Creation Chatbot",
+            "name": "JIRA Ticket Creation API",
             "version": "1.0.0",
-            "description": "Professional JIRA ticket creation with AI enhancement and Teams notifications",
-            "endpoints": {
-                "create_ticket": "/tickets",
-                "project_metadata": "/projects/{project_key}/metadata",
-                "health_check": "/health"
-            }
+            "endpoints": [
+                "/tickets (POST): Create ticket",
+                "/projects/{project_key}/metadata (GET): Project metadata",
+                "/health (GET): Health check"
+            ]
         }
-    
+
     return app
 
-
-# CLI Interface
-def jira_main():
-    """Main CLI interface for the JIRA chatbot."""
-    import argparse
+# For running directly if needed
+if __name__ == "__main__":
     import uvicorn
-    
-    parser = argparse.ArgumentParser(description="JIRA Ticket Creation Chatbot")
-    parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
-    parser.add_argument('--port', default=8000, type=int, help='Port to bind to')
-    parser.add_argument('--reload', action='store_true', help='Enable auto-reload')
-    parser.add_argument('--log-level', default='info', help='Log level')
-    
-    args = parser.parse_args()
-    
-    # Create and run the app
     app = create_app()
-    uvicorn.run(
-        app,
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-        log_level=args.log_level
-    )
+    uvicorn.run(app, host="0.0.0.0", port=8000)
