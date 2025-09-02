@@ -61,7 +61,7 @@ except Exception as e:
 app = FastAPI(
     title="Jira Ticket Creator API",
     description="A robust API for creating Jira tickets with AI enhancement, sprint integration, and Microsoft Teams notifications.",
-    version="2.4.0",
+    version="1.0.0",
     openapi_tags=[
         {"name": "Tickets", "description": "Operations for creating and managing Jira tickets"},
         {"name": "Health", "description": "System health and connectivity checks"}
@@ -716,7 +716,7 @@ async def help_endpoint():
     """
     return {
         "message": "Jira Ticket Creator API Help",
-        "version": "2.4.0",
+        "version": "1.0.0",
         "interactive_docs": "You can access the interactive Swagger UI documentation at /docs to test endpoints directly by providing required information.",
         "endpoints": [
             {
@@ -740,7 +740,7 @@ async def help_endpoint():
             }
         ],
         "priority_options": AVAILABLE_PRIORITIES,
-        "contact": "support@example.com"
+        "contact": "reddyakkem@blackduck.com"
     }
 
 if __name__ == "__main__":
