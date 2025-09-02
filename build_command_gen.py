@@ -22,6 +22,8 @@ from collections import Counter
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import shutil
+import tempfile
 
 import requests
 import yaml
@@ -890,8 +892,9 @@ Return only a JSON array: [{{"command": "npm install", "confidence": 95, "descri
 class EnhancedRepositoryAnalyzer:
     """Performs comprehensive repository analysis."""
 
-    def __init__(self, ai_provider: Optional[EnhancedAIProvider] = None):
+    def __init__(self, ai_provider: Optional[EnhancedAIProvider] = None, repo_url: Optional[str] = None):
         self.ai_provider = ai_provider
+        self.repo_url = repo_url
         self.parser = SafeFileParser()
 
     def analyze_repository(self, repo_path: str) -> ProjectInfo:
@@ -1063,16 +1066,62 @@ class EnhancedRepositoryAnalyzer:
 
     def _analyze_languages(self, repo_path: Path) -> Dict[str, float]:
         """Analyzes language distribution in the repository."""
-        extensions = Counter()
-        total = 0
-
+        local_bytes = Counter()
         for file_path in repo_path.rglob("*"):
             if file_path.is_file() and not self._should_ignore_file(file_path):
                 ext = file_path.suffix.lower()
-                if ext:
-                    extensions[ext] += 1
-                    total += 1
+                lang = self._get_lang_from_ext(ext)
+                if lang:
+                    try:
+                        size = file_path.stat().st_size
+                        local_bytes[lang] += size
+                    except Exception:
+                        pass
 
+        total_local = sum(local_bytes.values())
+        local_languages = {lang: (b / total_local * 100) if total_local else 0 for lang, b in local_bytes.items()}
+
+        github_languages = None
+        if self.repo_url and "github.com" in self.repo_url:
+            try:
+                match = re.match(r"https?://github\.com/([^/]+)/([^/]+)", self.repo_url)
+                if match:
+                    owner, repo_name = match.groups()
+                    if repo_name.endswith(".git"):
+                        repo_name = repo_name[:-4]
+                    api_url = f"https://api.github.com/repos/{owner}/{repo_name}/languages"
+                    headers = {"Accept": "application/vnd.github.v3+json"}
+                    resp = requests.get(api_url, headers=headers, timeout=5)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        total_gh = sum(data.values())
+                        github_languages = {lang.lower(): (b / total_gh * 100) if total_gh else 0 for lang, b in data.items()}
+            except Exception as e:
+                logger.debug(f"GitHub API error: {e}")
+
+        if github_languages:
+            # Cross-check primaries
+            primary_local = max(local_languages, key=local_languages.get, default="unknown")
+            primary_gh = max(github_languages, key=github_languages.get, default="unknown")
+            if primary_local != primary_gh:
+                logger.warning(f"Language primary mismatch: local {primary_local}, GitHub {primary_gh}")
+
+            # Merge by averaging
+            all_langs = set(local_languages) | set(github_languages)
+            merged = {}
+            for lang in all_langs:
+                l = local_languages.get(lang, 0)
+                g = github_languages.get(lang, 0)
+                merged[lang] = (l + g) / 2 if l and g else l or g
+            total_merged = sum(merged.values())
+            languages = {lang: (p / total_merged * 100) if total_merged else 0 for lang, p in merged.items()}
+        else:
+            languages = local_languages
+
+        return languages
+
+    def _get_lang_from_ext(self, ext: str) -> Optional[str]:
+        """Maps extension to language."""
         ext_lang_map = {
             ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
             ".ts": "typescript", ".tsx": "typescript", ".py": "python",
@@ -1080,15 +1129,7 @@ class EnhancedRepositoryAnalyzer:
             ".cc": "cpp", ".cxx": "cpp", ".c": "c", ".cs": "csharp",
             ".rb": "ruby", ".php": "php"
         }
-
-        languages = {}
-        for ext, count in extensions.items():
-            if ext in ext_lang_map:
-                lang = ext_lang_map[ext]
-                percentage = (count / max(total, 1)) * 100
-                languages[lang] = languages.get(lang, 0) + percentage
-
-        return languages
+        return ext_lang_map.get(ext)
 
     def _analyze_structure(self, repo_path: Path) -> Dict[str, Any]:
         """Analyzes the project directory structure."""
@@ -1138,42 +1179,8 @@ def create_ai_provider(provider_type: str, **kwargs) -> Optional[EnhancedAIProvi
         logger.error(f"Failed to create {provider_type} provider: {e}")
         return None
 
-def main():
-    """Main entry point for repository analysis."""
-    parser = argparse.ArgumentParser(
-        description="Smart Repository Build Command Analyzer",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python analyzer.py /path/to/repo
-  python analyzer.py /path/to/repo --ai ollama --ai-model gpt-oss:latest
-  python analyzer.py /path/to/repo --output json
-  python analyzer.py /path/to/repo --category build --top-commands 5
-        """
-    )
-
-    parser.add_argument("repo_path", help="Path to the repository to analyze")
-    parser.add_argument("--output", "-o", choices=["json", "yaml", "text"], default="text", help="Output format")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
-    parser.add_argument("--top-commands", "-n", type=int, default=10, help="Number of top commands to show")
-    parser.add_argument("--category", "-c", choices=["all", "install", "build", "test", "run", "dev", "clean", "lint"],
-                        default="all", help="Filter commands by category")
-    ai_group = parser.add_argument_group("AI Enhancement Options")
-    ai_group.add_argument("--ai", choices=["ollama", "claude", "openai"], help="Enable AI analysis")
-    ai_group.add_argument("--ai-model", help="AI model to use")
-    ai_group.add_argument("--ai-host", default="http://localhost:11434", help="AI host URL for Ollama")
-    ai_group.add_argument("--ai-key", help="API key for Claude/OpenAI")
-
-    args = parser.parse_args()
-
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-
-    repo_path = Path(args.repo_path)
-    if not repo_path.exists() or not repo_path.is_dir():
-        logger.error(f"Invalid repository path: {repo_path}")
-        sys.exit(1)
-
+def analyze_and_output(args, repo_path: Path, repo_url: Optional[str]):
+    """Performs analysis and outputs results."""
     try:
         ai_provider = None
         if args.ai:
@@ -1186,7 +1193,7 @@ Examples:
                 ai_kwargs["api_key"] = args.ai_key
             ai_provider = create_ai_provider(args.ai, **ai_kwargs)
 
-        analyzer = EnhancedRepositoryAnalyzer(ai_provider)
+        analyzer = EnhancedRepositoryAnalyzer(ai_provider, repo_url)
         project_info = analyzer.analyze_repository(str(repo_path))
 
         filtered_commands = [cmd for cmd in project_info.build_commands if args.category == "all" or cmd.category == args.category]
@@ -1267,6 +1274,58 @@ Examples:
             import traceback
             traceback.print_exc()
         sys.exit(1)
+
+def main():
+    """Main entry point for repository analysis."""
+    parser = argparse.ArgumentParser(
+        description="Smart Repository Build Command Analyzer",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python analyzer.py /path/to/repo
+  python analyzer.py https://github.com/owner/repo
+  python analyzer.py /path/to/repo --ai ollama --ai-model gpt-oss:latest
+  python analyzer.py /path/to/repo --output json
+  python analyzer.py /path/to/repo --category build --top-commands 5
+        """
+    )
+
+    parser.add_argument("repo", help="Path or URL to the repository to analyze")
+    parser.add_argument("--output", "-o", choices=["json", "yaml", "text"], default="text", help="Output format")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--top-commands", "-n", type=int, default=10, help="Number of top commands to show")
+    parser.add_argument("--category", "-c", choices=["all", "install", "build", "test", "run", "dev", "clean", "lint"],
+                        default="all", help="Filter commands by category")
+    ai_group = parser.add_argument_group("AI Enhancement Options")
+    ai_group.add_argument("--ai", choices=["ollama", "claude", "openai"], help="Enable AI analysis")
+    ai_group.add_argument("--ai-model", help="AI model to use")
+    ai_group.add_argument("--ai-host", default="http://localhost:11434", help="AI host URL for Ollama")
+    ai_group.add_argument("--ai-key", help="API key for Claude/OpenAI")
+
+    args = parser.parse_args()
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    is_url = args.repo.startswith(('http://', 'https://'))
+    if is_url:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                subprocess.check_call(["git", "clone", "--depth=1", args.repo, temp_dir])
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to clone repository from URL {args.repo}: {e}")
+                sys.exit(1)
+            except FileNotFoundError:
+                logger.error("Git is not installed or not in PATH.")
+                sys.exit(1)
+            repo_path = Path(temp_dir)
+            analyze_and_output(args, repo_path, args.repo)
+    else:
+        repo_path = Path(args.repo).resolve()
+        if not repo_path.exists() or not repo_path.is_dir():
+            logger.error(f"Invalid repository path: {args.repo}")
+            sys.exit(1)
+        analyze_and_output(args, repo_path, None)
 
 if __name__ == "__main__":
     main()
