@@ -9,14 +9,6 @@ License: MIT
 Analyzes repositories to generate accurate build commands for various project types.
 Follows PEP 8 conventions with clear naming and robust error handling.
 Optimized for mixed codebases and subprojects in 2025.
-
-Updates:
-- Enhanced AI handling: Implemented support for OpenAI and Claude (Anthropic) in addition to Ollama.
-  Handles scenarios where AI providers are not installed, API keys are missing, or connections fail.
-  Falls back gracefully without AI if any issues occur.
-- Added Streamlit UI mode: Run with --ui flag to launch a web-based interface.
-  Requires 'streamlit' package installed. Handles both local paths and GitHub URLs.
-  Reuses core analysis logic and renders results interactively.
 """
 
 import argparse
@@ -32,21 +24,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import shutil
 import tempfile
-import io
 
 import requests
 import yaml
-
-# Optional imports for AI providers
-try:
-    from openai import OpenAI
-except ImportError:
-    OpenAI = None
-
-try:
-    from anthropic import Anthropic
-except ImportError:
-    Anthropic = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -797,42 +777,22 @@ class SmartCommandGenerator:
             logger.debug(f"Validation failed for {command.command}: {e}")
 
 class EnhancedAIProvider:
-    """Provides AI-enhanced analysis for build command generation. Handles multiple providers robustly."""
+    """Provides AI-enhanced analysis for build command generation."""
 
     def __init__(self, provider_type: str, **kwargs):
         self.provider_type = provider_type.lower()
         self.model = kwargs.get("model", self._get_default_model())
         self.api_key = kwargs.get("api_key")
         self.host = kwargs.get("host", "http://localhost:11434")
-        self.client = None
-
-        try:
-            if self.provider_type == "ollama":
-                self._setup_ollama()
-            elif self.provider_type == "openai":
-                if not OpenAI:
-                    raise ImportError("openai package is not installed. Install it with 'pip install openai'.")
-                if not self.api_key:
-                    raise ValueError("API key is required for OpenAI.")
-                self.client = OpenAI(api_key=self.api_key)
-            elif self.provider_type == "claude":
-                if not Anthropic:
-                    raise ImportError("anthropic package is not installed. Install it with 'pip install anthropic'.")
-                if not self.api_key:
-                    raise ValueError("API key is required for Claude.")
-                self.client = Anthropic(api_key=self.api_key)
-            else:
-                raise ValueError(f"Unsupported AI provider: {self.provider_type}")
-        except Exception as e:
-            logger.warning(f"Failed to initialize AI provider '{self.provider_type}': {e}. Falling back to no AI.")
-            self.provider_type = None  # Disable AI if setup fails
+        if self.provider_type == "ollama":
+            self._setup_ollama()
 
     def _get_default_model(self) -> str:
         """Returns the default AI model for the provider."""
         return {
             "ollama": "gpt-oss:latest",
-            "openai": "gpt-5",
             "claude": "claude-4-sonnet",
+            "openai": "gpt-5",
         }.get(self.provider_type, "gpt-oss:latest")
 
     def _setup_ollama(self):
@@ -845,78 +805,30 @@ class EnhancedAIProvider:
             models = response.json().get("models", [])
             model_names = [m.get("name", "") for m in models]
             if not any(self.model in name for name in model_names):
-                logger.info(f"Model {self.model} not found, attempting to pull...")
+                logger.warning(f"Model {self.model} not found, attempting to pull...")
                 pull_response = requests.post(
                     f"{self.host}/api/pull",
                     json={"name": self.model, "stream": False},
-                    timeout=300  # Increased timeout for model pull
+                    timeout=120
                 )
                 if pull_response.status_code != 200:
-                    raise Exception(f"Failed to pull model {self.model}")
+                    logger.error(f"Failed to pull model {self.model}")
+                    raise Exception(f"Model {self.model} unavailable")
         except Exception as e:
-            raise Exception(f"Ollama setup failed: {e}")
+            logger.error(f"Ollama setup failed: {e}")
+            raise
 
     def analyze_repository(self, project_summary: str, key_files: Dict[str, str]) -> List[BuildCommand]:
-        """Analyzes repository using AI, with fallback if provider fails."""
-        if not self.provider_type:
-            return []  # AI disabled
-
-        try:
-            if self.provider_type == "ollama":
-                return self._analyze_with_ollama(project_summary, key_files)
-            elif self.provider_type == "openai":
-                return self._analyze_with_openai(project_summary, key_files)
-            elif self.provider_type == "claude":
-                return self._analyze_with_claude(project_summary, key_files)
-        except Exception as e:
-            logger.warning(f"AI analysis with {self.provider_type} failed: {e}. Continuing without AI.")
+        """Analyzes repository using AI."""
+        if self.provider_type == "ollama":
+            return self._analyze_with_ollama(project_summary, key_files)
+        logger.error(f"Unsupported AI provider: {self.provider_type}")
         return []
 
     def _analyze_with_ollama(self, project_summary: str, key_files: Dict[str, str]) -> List[BuildCommand]:
         """Performs Ollama-based analysis."""
-        prompt = self._build_prompt(project_summary, key_files)
-        response = requests.post(
-            f"{self.host}/api/generate",
-            json={
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.1, "top_k": 10, "top_p": 0.9, "num_ctx": 4096},
-            },
-            timeout=60,
-        )
-        if response.status_code == 200:
-            result = response.json()
-            return self._parse_ai_response(result.get("response", ""))
-        raise Exception(f"Ollama request failed: {response.status_code}")
-
-    def _analyze_with_openai(self, project_summary: str, key_files: Dict[str, str]) -> List[BuildCommand]:
-        """Performs OpenAI-based analysis."""
-        prompt = self._build_prompt(project_summary, key_files)
-        completion = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=2000,
-        )
-        response = completion.choices[0].message.content
-        return self._parse_ai_response(response)
-
-    def _analyze_with_claude(self, project_summary: str, key_files: Dict[str, str]) -> List[BuildCommand]:
-        """Performs Claude-based analysis."""
-        prompt = self._build_prompt(project_summary, key_files)
-        message = self.client.messages.create(
-            model=self.model,
-            max_tokens=2000,
-            temperature=0.1,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        response = message.content[0].text
-        return self._parse_ai_response(response)
-
-    def _build_prompt(self, project_summary: str, key_files: Dict[str, str]) -> str:
-        """Builds the AI prompt."""
-        return f"""Analyze this repository and provide essential build commands:
+        try:
+            prompt = f"""Analyze this repository and provide essential build commands:
 
 {project_summary}
 
@@ -924,6 +836,23 @@ Key files:
 {self._format_key_files(key_files)}
 
 Return only a JSON array: [{{"command": "npm install", "confidence": 95, "description": "Install dependencies", "category": "install", "priority": 100, "requires": ["package.json"]}}]"""
+            response = requests.post(
+                f"{self.host}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": 0.1, "top_k": 10, "top_p": 0.9, "num_ctx": 4096},
+                },
+                timeout=60,
+            )
+            if response.status_code == 200:
+                result = response.json()
+                return self._parse_ai_response(result.get("response", ""))
+            logger.warning(f"Ollama request failed: {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Ollama analysis failed: {e}")
+        return []
 
     def _format_key_files(self, key_files: Dict[str, str]) -> str:
         """Formats key files for AI consumption."""
@@ -1243,102 +1172,99 @@ class EnhancedRepositoryAnalyzer:
                                  ".idea", ".vscode", "build", "dist", "target", ".gradle"}
 
 def create_ai_provider(provider_type: str, **kwargs) -> Optional[EnhancedAIProvider]:
-    """Creates an AI provider instance with fallback."""
-    if not provider_type:
-        return None
+    """Creates an AI provider instance."""
     try:
         return EnhancedAIProvider(provider_type, **kwargs)
     except Exception as e:
         logger.error(f"Failed to create {provider_type} provider: {e}")
         return None
 
-def get_project_info(repo_path: Path, repo_url: Optional[str], ai_provider: Optional[EnhancedAIProvider]) -> ProjectInfo:
-    """Extracted function to get ProjectInfo, reusable for CLI and UI."""
-    analyzer = EnhancedRepositoryAnalyzer(ai_provider, repo_url)
-    return analyzer.analyze_repository(str(repo_path))
-
-def render_output(project_info: ProjectInfo, category: str, top_commands: int, output_format: str, output_stream: io.StringIO = None) -> Optional[str]:
-    """Renders the output in specified format. If output_stream, writes to it; else returns string."""
-    filtered_commands = [cmd for cmd in project_info.build_commands if category == "all" or cmd.category == category][:top_commands]
-
-    if output_format == "json":
-        output_data = asdict(project_info)
-        output_data["build_commands"] = [asdict(cmd) for cmd in filtered_commands]
-        output_str = json.dumps(output_data, indent=2, default=str)
-    elif output_format == "yaml":
-        output_data = asdict(project_info)
-        output_data["build_commands"] = [asdict(cmd) for cmd in filtered_commands]
-        output_str = yaml.dump(output_data, default_flow_style=False)
-    else:
-        output_buf = output_stream or io.StringIO()
-        print(f"\n🔍 Repository Analysis: {Path(project_info.project_structure.get('root_files', [])[0] if project_info.project_structure.get('root_files') else 'Unknown').parent.name}", file=output_buf)
-        print("=" * 60, file=output_buf)
-        print(f"📋 Project Type: {project_info.project_type.replace('_', ' ').title()}", file=output_buf)
-        print(f"💻 Primary Language: {project_info.primary_language.title()}", file=output_buf)
-        print(f"🔧 Build System: {project_info.build_system.title()}", file=output_buf)
-        print(f"📦 Package Manager: {project_info.package_manager.title()}", file=output_buf)
-        print(f"📊 Analysis Confidence: {project_info.analysis_confidence:.1f}%", file=output_buf)
-
-        if project_info.frameworks:
-            print(f"🚀 Frameworks: {', '.join(project_info.frameworks)}", file=output_buf)
-        if project_info.entry_points:
-            print(f"🎯 Entry Points: {', '.join(project_info.entry_points)}", file=output_buf)
-
-        if project_info.subprojects:
-            print("\n📂 Subprojects:", file=output_buf)
-            for sub in project_info.subprojects:
-                print(f"  - {sub['name']}: {sub['type']} ({sub['confidence']:.1f}%)", file=output_buf)
-
-        if project_info.languages:
-            print(f"\n📈 Language Distribution:", file=output_buf)
-            for lang, percentage in sorted(project_info.languages.items(), key=lambda x: x[1], reverse=True)[:5]:
-                bar = "█" * int(percentage / 5) + "░" * (20 - int(percentage / 5))
-                print(f"  {lang.title()}: {percentage:.1f}% [{bar}]", file=output_buf)
-
-        if filtered_commands:
-            print(f"\n⚡ Build Commands ({category.title() if category != 'all' else 'All'}):", file=output_buf)
-            print("-" * 50, file=output_buf)
-            for i, cmd in enumerate(filtered_commands, 1):
-                confidence_bar = "█" * (cmd.confidence // 10) + "░" * (10 - cmd.confidence // 10)
-                category_emoji = {
-                    "install": "📥", "build": "🔨", "test": "🧪", "run": "🚀",
-                    "dev": "💻", "clean": "🧹", "lint": "✨"
-                }.get(cmd.category, "⚙️")
-                print(f"\n{i}. {cmd.command}", file=output_buf)
-                print(f"   {category_emoji} {cmd.category.title()} | Confidence: {cmd.confidence}% [{confidence_bar}]", file=output_buf)
-                print(f"   💡 {cmd.description}", file=output_buf)
-                if cmd.validation_result == "tool_missing":
-                    print(f"   ⚠️ Tool may not be installed", file=output_buf)
-                elif cmd.validation_result == "tool_available":
-                    print(f"   ✅ Tool available", file=output_buf)
-                if cmd.requires:
-                    print(f"   📋 Requires: {', '.join(cmd.requires)}", file=output_buf)
-        else:
-            print(f"\n❌ No {category} commands found!" if category != "all" else "\n❌ No build commands detected!", file=output_buf)
-
-        if project_info.errors:
-            print(f"\n⚠️ Warnings:", file=output_buf)
-            for error in project_info.errors:
-                print(f"   • {error}", file=output_buf)
-
-        print(f"\n📋 Analysis Summary:", file=output_buf)
-        print(f"   • Confidence: {project_info.analysis_confidence:.1f}%", file=output_buf)
-        print(f"   • Commands found: {len(project_info.build_commands)}", file=output_buf)
-        if project_info.analysis_confidence < 70:
-            print("   💡 Consider using --ai flag for enhanced analysis", file=output_buf)
-        if ai_provider:
-            print(f"   🤖 AI-enhanced analysis completed", file=output_buf)
-
-        if not output_stream:
-            return output_buf.getvalue()
-        return None
-
 def analyze_and_output(args, repo_path: Path, repo_url: Optional[str]):
-    """Performs analysis and outputs results for CLI."""
+    """Performs analysis and outputs results."""
     try:
-        ai_provider = create_ai_provider(args.ai, model=args.ai_model, host=args.ai_host, api_key=args.ai_key) if args.ai else None
-        project_info = get_project_info(repo_path, repo_url, ai_provider)
-        render_output(project_info, args.category, args.top_commands, args.output, sys.stdout)
+        ai_provider = None
+        if args.ai:
+            ai_kwargs = {}
+            if args.ai_model:
+                ai_kwargs["model"] = args.ai_model
+            if args.ai_host:
+                ai_kwargs["host"] = args.ai_host
+            if args.ai_key:
+                ai_kwargs["api_key"] = args.ai_key
+            ai_provider = create_ai_provider(args.ai, **ai_kwargs)
+
+        analyzer = EnhancedRepositoryAnalyzer(ai_provider, repo_url)
+        project_info = analyzer.analyze_repository(str(repo_path))
+
+        filtered_commands = [cmd for cmd in project_info.build_commands if args.category == "all" or cmd.category == args.category]
+
+        if args.output == "json":
+            output_data = asdict(project_info)
+            output_data["build_commands"] = [asdict(cmd) for cmd in filtered_commands[:args.top_commands]]
+            print(json.dumps(output_data, indent=2, default=str))
+        elif args.output == "yaml":
+            output_data = asdict(project_info)
+            output_data["build_commands"] = [asdict(cmd) for cmd in filtered_commands[:args.top_commands]]
+            print(yaml.dump(output_data, default_flow_style=False))
+        else:
+            print(f"\n🔍 Repository Analysis: {repo_path.name}")
+            print("=" * 60)
+            print(f"📋 Project Type: {project_info.project_type.replace('_', ' ').title()}")
+            print(f"💻 Primary Language: {project_info.primary_language.title()}")
+            print(f"🔧 Build System: {project_info.build_system.title()}")
+            print(f"📦 Package Manager: {project_info.package_manager.title()}")
+            print(f"📊 Analysis Confidence: {project_info.analysis_confidence:.1f}%")
+
+            if project_info.frameworks:
+                print(f"🚀 Frameworks: {', '.join(project_info.frameworks)}")
+            if project_info.entry_points:
+                print(f"🎯 Entry Points: {', '.join(project_info.entry_points)}")
+
+            if project_info.subprojects:
+                print("\n📂 Subprojects:")
+                for sub in project_info.subprojects:
+                    print(f"  - {sub['name']}: {sub['type']} ({sub['confidence']:.1f}%)")
+
+            if project_info.languages:
+                print(f"\n📈 Language Distribution:")
+                for lang, percentage in sorted(project_info.languages.items(), key=lambda x: x[1], reverse=True)[:5]:
+                    bar = "█" * int(percentage / 5) + "░" * (20 - int(percentage / 5))
+                    print(f"  {lang.title()}: {percentage:.1f}% [{bar}]")
+
+            if filtered_commands:
+                print(f"\n⚡ Build Commands ({args.category.title() if args.category != 'all' else 'All'}):")
+                print("-" * 50)
+                for i, cmd in enumerate(filtered_commands[:args.top_commands], 1):
+                    confidence_bar = "█" * (cmd.confidence // 10) + "░" * (10 - cmd.confidence // 10)
+                    category_emoji = {
+                        "install": "📥", "build": "🔨", "test": "🧪", "run": "🚀",
+                        "dev": "💻", "clean": "🧹", "lint": "✨"
+                    }.get(cmd.category, "⚙️")
+                    print(f"\n{i}. {cmd.command}")
+                    print(f"   {category_emoji} {cmd.category.title()} | Confidence: {cmd.confidence}% [{confidence_bar}]")
+                    print(f"   💡 {cmd.description}")
+                    if cmd.validation_result == "tool_missing":
+                        print(f"   ⚠️ Tool may not be installed")
+                    elif cmd.validation_result == "tool_available":
+                        print(f"   ✅ Tool available")
+                    if cmd.requires:
+                        print(f"   📋 Requires: {', '.join(cmd.requires)}")
+            else:
+                print(f"\n❌ No {args.category} commands found!" if args.category != "all" else "\n❌ No build commands detected!")
+
+            if project_info.errors:
+                print(f"\n⚠️ Warnings:")
+                for error in project_info.errors:
+                    print(f"   • {error}")
+
+            print(f"\n📋 Analysis Summary:")
+            print(f"   • Confidence: {project_info.analysis_confidence:.1f}%")
+            print(f"   • Commands found: {len(project_info.build_commands)}")
+            if project_info.analysis_confidence < 70:
+                print("   💡 Consider using --ai flag for enhanced analysis")
+            if ai_provider:
+                print(f"   🤖 AI-enhanced analysis completed")
+
     except KeyboardInterrupt:
         print("\n❌ Analysis interrupted by user")
         sys.exit(1)
@@ -1348,123 +1274,6 @@ def analyze_and_output(args, repo_path: Path, repo_url: Optional[str]):
             import traceback
             traceback.print_exc()
         sys.exit(1)
-
-def run_streamlit_app():
-    """Runs the Streamlit UI."""
-    import streamlit as st
-
-    st.title("Smart Repository Build Command Analyzer")
-
-    repo = st.text_input("Enter repository path or URL")
-    ai_provider_str = st.selectbox("AI Provider", ["none", "ollama", "openai", "claude"])
-    ai_model = ""
-    ai_host = ""
-    ai_key = ""
-    if ai_provider_str != "none":
-        ai_model = st.text_input("AI Model (optional, uses default if blank)")
-        if ai_provider_str == "ollama":
-            ai_host = st.text_input("Ollama Host", value="http://localhost:11434")
-        else:
-            ai_key = st.text_input("API Key", type="password")
-    category = st.selectbox("Category", ["all", "install", "build", "test", "run", "dev", "clean", "lint"])
-    top_commands = st.number_input("Top Commands", min_value=1, max_value=50, value=10)
-    output_format = st.selectbox("Output Format", ["text", "json", "yaml"])
-
-    if st.button("Analyze"):
-        if not repo:
-            st.error("Please enter a repository path or URL.")
-            return
-
-        is_url = repo.startswith(('http://', 'https://'))
-        repo_url = repo if is_url else None
-        with st.spinner("Analyzing repository..."):
-            try:
-                if is_url:
-                    with tempfile.TemporaryDirectory() as temp_dir:
-                        subprocess.check_call(["git", "clone", "--depth=1", repo, temp_dir])
-                        repo_path = Path(temp_dir)
-                        ai_provider = create_ai_provider(ai_provider_str, model=ai_model if ai_model else None, host=ai_host, api_key=ai_key) if ai_provider_str != "none" else None
-                        project_info = get_project_info(repo_path, repo_url, ai_provider)
-                        render_in_streamlit(project_info, category, top_commands, output_format)
-                else:
-                    repo_path = Path(repo).resolve()
-                    if not repo_path.exists() or not repo_path.is_dir():
-                        st.error(f"Invalid repository path: {repo}")
-                        return
-                    ai_provider = create_ai_provider(ai_provider_str, model=ai_model if ai_model else None, host=ai_host, api_key=ai_key) if ai_provider_str != "none" else None
-                    project_info = get_project_info(repo_path, repo_url, ai_provider)
-                    render_in_streamlit(project_info, category, top_commands, output_format)
-            except subprocess.CalledProcessError as e:
-                st.error(f"Failed to clone repository: {e}")
-            except FileNotFoundError:
-                st.error("Git is not installed or not in PATH.")
-            except Exception as e:
-                st.error(f"Analysis failed: {e}")
-
-def render_in_streamlit(project_info: ProjectInfo, category: str, top_commands: int, output_format: str):
-    """Renders the analysis results in Streamlit UI."""
-    import streamlit as st
-
-    filtered_commands = [cmd for cmd in project_info.build_commands if category == "all" or cmd.category == category][:top_commands]
-
-    if output_format == "json":
-        output_data = asdict(project_info)
-        output_data["build_commands"] = [asdict(cmd) for cmd in filtered_commands]
-        st.json(output_data)
-    elif output_format == "yaml":
-        output_data = asdict(project_info)
-        output_data["build_commands"] = [asdict(cmd) for cmd in filtered_commands]
-        st.code(yaml.dump(output_data, default_flow_style=False), language="yaml")
-    else:
-        st.header(f"Repository Analysis: {Path(project_info.project_structure.get('root_files', [])[0] if project_info.project_structure.get('root_files') else 'Unknown').parent.name}")
-        st.subheader(f"Project Type: {project_info.project_type.replace('_', ' ').title()}")
-        st.write(f"**Primary Language:** {project_info.primary_language.title()}")
-        st.write(f"**Build System:** {project_info.build_system.title()}")
-        st.write(f"**Package Manager:** {project_info.package_manager.title()}")
-        st.write(f"**Analysis Confidence:** {project_info.analysis_confidence:.1f}%")
-
-        if project_info.frameworks:
-            st.write(f"**Frameworks:** {', '.join(project_info.frameworks)}")
-        if project_info.entry_points:
-            st.write(f"**Entry Points:** {', '.join(project_info.entry_points)}")
-
-        if project_info.subprojects:
-            st.subheader("Subprojects")
-            for sub in project_info.subprojects:
-                st.write(f"- {sub['name']}: {sub['type']} ({sub['confidence']:.1f}%)")
-
-        if project_info.languages:
-            st.subheader("Language Distribution")
-            for lang, percentage in sorted(project_info.languages.items(), key=lambda x: x[1], reverse=True)[:5]:
-                st.progress(percentage / 100)
-                st.write(f"{lang.title()}: {percentage:.1f}%")
-
-        if filtered_commands:
-            st.subheader(f"Build Commands ({category.title() if category != 'all' else 'All'})")
-            for i, cmd in enumerate(filtered_commands, 1):
-                with st.expander(f"{i}. {cmd.command}"):
-                    st.write(f"**Category:** {cmd.category.title()}")
-                    st.write(f"**Confidence:** {cmd.confidence}%")
-                    st.write(f"**Description:** {cmd.description}")
-                    if cmd.validation_result == "tool_missing":
-                        st.warning("Tool may not be installed")
-                    elif cmd.validation_result == "tool_available":
-                        st.success("Tool available")
-                    if cmd.requires:
-                        st.write(f"**Requires:** {', '.join(cmd.requires)}")
-        else:
-            st.error(f"No {category} commands found!" if category != "all" else "No build commands detected!")
-
-        if project_info.errors:
-            st.subheader("Warnings")
-            for error in project_info.errors:
-                st.warning(error)
-
-        st.subheader("Analysis Summary")
-        st.write(f"- Confidence: {project_info.analysis_confidence:.1f}%")
-        st.write(f"- Commands found: {len(project_info.build_commands)}")
-        if project_info.analysis_confidence < 70:
-            st.info("Consider enabling AI for enhanced analysis")
 
 def main():
     """Main entry point for repository analysis."""
@@ -1478,17 +1287,15 @@ Examples:
   python analyzer.py /path/to/repo --ai ollama --ai-model gpt-oss:latest
   python analyzer.py /path/to/repo --output json
   python analyzer.py /path/to/repo --category build --top-commands 5
-  python analyzer.py --ui  # Launches Streamlit UI (run with 'streamlit run analyzer.py' for best results, or use --ui for integrated mode)
         """
     )
 
-    parser.add_argument("repo", nargs="?", help="Path or URL to the repository to analyze (optional in --ui mode)")
+    parser.add_argument("repo", help="Path or URL to the repository to analyze")
     parser.add_argument("--output", "-o", choices=["json", "yaml", "text"], default="text", help="Output format")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     parser.add_argument("--top-commands", "-n", type=int, default=10, help="Number of top commands to show")
     parser.add_argument("--category", "-c", choices=["all", "install", "build", "test", "run", "dev", "clean", "lint"],
                         default="all", help="Filter commands by category")
-    parser.add_argument("--ui", action="store_true", help="Run in Streamlit UI mode")
     ai_group = parser.add_argument_group("AI Enhancement Options")
     ai_group.add_argument("--ai", choices=["ollama", "claude", "openai"], help="Enable AI analysis")
     ai_group.add_argument("--ai-model", help="AI model to use")
@@ -1500,34 +1307,29 @@ Examples:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    if args.ui:
-        try:
-            run_streamlit_app()
-        except ImportError:
-            logger.error("Streamlit not installed. Install with 'pip install streamlit'.")
-            sys.exit(1)
-    else:
-        if not args.repo:
-            parser.error("repo argument is required in CLI mode")
-        is_url = args.repo.startswith(('http://', 'https://'))
-        if is_url:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                try:
-                    subprocess.check_call(["git", "clone", "--depth=1", args.repo, temp_dir])
-                except subprocess.CalledProcessError as e:
-                    logger.error(f"Failed to clone repository from URL {args.repo}: {e}")
-                    sys.exit(1)
-                except FileNotFoundError:
-                    logger.error("Git is not installed or not in PATH.")
-                    sys.exit(1)
-                repo_path = Path(temp_dir)
-                analyze_and_output(args, repo_path, args.repo)
-        else:
-            repo_path = Path(args.repo).resolve()
-            if not repo_path.exists() or not repo_path.is_dir():
-                logger.error(f"Invalid repository path: {args.repo}")
+    is_url = args.repo.startswith(('http://', 'https://'))
+    if is_url:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                subprocess.check_call(["git", "clone", "--depth=1", args.repo, temp_dir])
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to clone repository from URL {args.repo}: {e}")
                 sys.exit(1)
-            analyze_and_output(args, repo_path, None)
+            except FileNotFoundError:
+                logger.error("Git is not installed or not in PATH.")
+                sys.exit(1)
+            repo_path = Path(temp_dir)
+            analyze_and_output(args, repo_path, args.repo)
+    else:
+        repo_path = Path(args.repo).resolve()
+        if not repo_path.exists() or not repo_path.is_dir():
+            logger.error(f"Invalid repository path: {args.repo}")
+            sys.exit(1)
+        analyze_and_output(args, repo_path, None)
 
 if __name__ == "__main__":
-    main() 
+    main()
+
+
+# AST Parser
+# 
